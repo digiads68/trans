@@ -1,0 +1,21 @@
+services:
+  backend:
+    build: ./backend
+    container_name: subtranslator-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    volumes:
+      - ./uploads:/app/uploads
+      - ./outputs:/app/outputs
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: subtranslator-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped

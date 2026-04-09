@@ -1,0 +1,316 @@
+import os
+import uuid
+import json
+import logging
+from typing import Optional
+
+from fastapi import APIRouter, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect, Query
+from fastapi.responses import FileResponse
+
+from app.config import settings
+from app.models.schemas import (
+    TranslationRequest,
+    TranslationResponse,
+    UploadResponse,
+    AvailableModelsResponse,
+    SubtitleEntry,
+    FileType,
+    TranslationProvider,
+    TranslationMode,
+    HealthResponse,
+)
+from app.services.parser import ParserFactory
+from app.services.translator import TranslatorFactory
+from app.services.exporter import ExporterFactory
+from app.utils.language_detect import detect_language_from_entries
+from app.api.websocket import manager
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+# In-memory store for uploaded files and their entries
+file_store: dict[str, dict] = {}
+
+
+@router.get("/health", response_model=HealthResponse)
+async def health_check():
+    return HealthResponse(status="ok", version=settings.APP_VERSION)
+
+
+@router.get("/models", response_model=AvailableModelsResponse)
+async def get_available_models():
+    """Get available translation models and providers."""
+    return AvailableModelsResponse(
+        llm_models=settings.AVAILABLE_LLM_MODELS,
+        providers=[p.value for p in TranslationProvider],
+        modes=[m.value for m in TranslationMode],
+    )
+
+
+@router.post("/upload", response_model=UploadResponse)
+async def upload_file(file: UploadFile = File(...)):
+    """Upload a subtitle file (SRT or Excel) for translation."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in ("srt", "xlsx", "xls"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file format: .{ext}. Supported: .srt, .xlsx, .xls",
+        )
+
+    file_id = str(uuid.uuid4())[:8]
+    content = await file.read()
+
+    # Save uploaded file
+    upload_path = os.path.join(settings.UPLOAD_DIR, f"{file_id}_{file.filename}")
+    with open(upload_path, "wb") as f:
+        f.write(content)
+
+    # Parse file
+    try:
+        parser = ParserFactory.get_parser(file.filename)
+        entries = await parser.parse(content, file.filename)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to parse file: {str(e)}")
+
+    # Detect language
+    texts = [e.original_text for e in entries]
+    detected_lang = detect_language_from_entries(texts)
+
+    # Store in memory
+    file_type = FileType.SRT if ext == "srt" else FileType.EXCEL
+    file_store[file_id] = {
+        "filename": file.filename,
+        "file_type": file_type,
+        "entries": entries,
+        "detected_lang": detected_lang,
+        "upload_path": upload_path,
+    }
+
+    return UploadResponse(
+        file_id=file_id,
+        filename=file.filename,
+        file_type=file_type,
+        entries=entries[:10],  # Preview first 10
+        detected_lang=detected_lang,
+        total_entries=len(entries),
+    )
+
+
+@router.get("/file/{file_id}/entries")
+async def get_file_entries(
+    file_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+):
+    """Get entries for an uploaded file with pagination."""
+    if file_id not in file_store:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    entries = file_store[file_id]["entries"]
+    total = len(entries)
+    start = (page - 1) * page_size
+    end = start + page_size
+
+    return {
+        "file_id": file_id,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "entries": entries[start:end],
+    }
+
+
+@router.post("/translate", response_model=TranslationResponse)
+async def translate_file(request: TranslationRequest):
+    """Start translation of an uploaded file."""
+    if request.file_id not in file_store:
+        raise HTTPException(status_code=404, detail="File not found. Please upload first.")
+
+    file_data = file_store[request.file_id]
+    entries = file_data["entries"]
+    source_lang = request.source_lang or file_data.get("detected_lang", "auto")
+
+    # Create translator
+    try:
+        translator = TranslatorFactory.create(
+            provider=request.provider,
+            model=request.llm_model,
+            api_base=settings.CLIPROXY_API_BASE,
+            api_key=settings.CLIPROXY_API_KEY,
+            hybrid_primary=request.hybrid_primary,
+            hybrid_fallback=request.hybrid_fallback,
+            hybrid_refine=request.hybrid_refine,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to create translator: {str(e)}")
+
+    # Progress callback that sends WebSocket updates
+    import asyncio
+
+    async def on_progress(completed: int, total: int, current_text: str):
+        await manager.send_progress(request.file_id, {
+            "type": "progress",
+            "file_id": request.file_id,
+            "completed": completed,
+            "total": total,
+            "current_text": current_text,
+            "status": "processing",
+        })
+
+    def sync_progress(completed: int, total: int, current_text: str):
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(on_progress(completed, total, current_text))
+        except RuntimeError:
+            pass
+
+    # Translate
+    try:
+        await manager.send_progress(request.file_id, {
+            "type": "start",
+            "file_id": request.file_id,
+            "total": len(entries),
+            "provider": translator.provider_name,
+            "status": "processing",
+        })
+
+        translated_entries = await translator.translate_batch(
+            entries=entries,
+            source_lang=source_lang,
+            target_lang=request.target_lang,
+            mode=request.mode,
+            on_progress=sync_progress,
+            custom_prompt=request.custom_prompt,
+            glossary=request.glossary,
+        )
+
+        # Update store
+        file_store[request.file_id]["entries"] = translated_entries
+
+        await manager.send_progress(request.file_id, {
+            "type": "complete",
+            "file_id": request.file_id,
+            "completed": len(entries),
+            "total": len(entries),
+            "status": "completed",
+        })
+
+        return TranslationResponse(
+            file_id=request.file_id,
+            original_file=file_data["filename"],
+            entries=translated_entries,
+            source_lang=source_lang,
+            target_lang=request.target_lang,
+            provider=translator.provider_name,
+            model=request.llm_model,
+            status="completed",
+        )
+
+    except Exception as e:
+        logger.error(f"Translation failed: {e}")
+        await manager.send_progress(request.file_id, {
+            "type": "error",
+            "file_id": request.file_id,
+            "error": str(e),
+            "status": "error",
+        })
+        raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
+
+
+@router.post("/translate/{file_id}/entry/{entry_index}")
+async def translate_single_entry(
+    file_id: str,
+    entry_index: int,
+    provider: TranslationProvider = TranslationProvider.LLM,
+    llm_model: str = "gpt-4o-mini",
+    target_lang: str = "vi",
+):
+    """Re-translate a single subtitle entry."""
+    if file_id not in file_store:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    entries = file_store[file_id]["entries"]
+    entry = next((e for e in entries if e.index == entry_index), None)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+
+    source_lang = file_store[file_id].get("detected_lang", "auto")
+
+    translator = TranslatorFactory.create(
+        provider=provider, model=llm_model,
+        api_base=settings.CLIPROXY_API_BASE,
+        api_key=settings.CLIPROXY_API_KEY,
+    )
+
+    entry.translated_text = await translator.translate_text(
+        entry.original_text, source_lang, target_lang,
+    )
+
+    return entry
+
+
+@router.put("/file/{file_id}/entry/{entry_index}")
+async def update_entry(file_id: str, entry_index: int, translated_text: str):
+    """Manually update a translation."""
+    if file_id not in file_store:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    entries = file_store[file_id]["entries"]
+    entry = next((e for e in entries if e.index == entry_index), None)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+
+    entry.translated_text = translated_text
+    return entry
+
+
+@router.get("/export/{file_id}")
+async def export_file(
+    file_id: str,
+    format: str = Query("srt", regex="^(srt|xlsx|excel)$"),
+):
+    """Export translated file in desired format."""
+    if file_id not in file_store:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    file_data = file_store[file_id]
+    entries = file_data["entries"]
+
+    # Check if translations exist
+    has_translations = any(e.translated_text for e in entries)
+    if not has_translations:
+        raise HTTPException(status_code=400, detail="No translations available. Please translate first.")
+
+    exporter = ExporterFactory.get_exporter(format)
+    base_name = file_data["filename"].rsplit(".", 1)[0]
+    output_filename = f"{base_name}_vi.{exporter.file_extension()}"
+    output_path = os.path.join(settings.OUTPUT_DIR, f"{file_id}_{output_filename}")
+
+    await exporter.export(entries, output_path)
+
+    return FileResponse(
+        path=output_path,
+        filename=output_filename,
+        media_type="application/octet-stream",
+    )
+
+
+@router.websocket("/ws/{file_id}")
+async def websocket_endpoint(websocket: WebSocket, file_id: str):
+    """WebSocket endpoint for real-time translation progress."""
+    await manager.connect(websocket, file_id)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            # Handle client messages if needed (e.g., cancel)
+            if data == "cancel":
+                await manager.send_progress(file_id, {
+                    "type": "cancelled",
+                    "file_id": file_id,
+                    "status": "cancelled",
+                })
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, file_id)
