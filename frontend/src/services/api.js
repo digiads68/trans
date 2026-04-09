@@ -51,8 +51,8 @@ export const updateEntry = async (fileId, entryIndex, translatedText) => {
   return response.data;
 };
 
-export const exportFile = (fileId, format = 'srt') => {
-  return `${API_BASE}/export/${fileId}?format=${format}`;
+export const exportFile = (fileId, format = 'srt', targetLang = 'vi') => {
+  return `${API_BASE}/export/${fileId}?format=${format}&target_lang=${targetLang}`;
 };
 
 export const createWebSocket = (fileId) => {

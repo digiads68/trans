@@ -41,14 +41,18 @@ export default function TranslationConfig({
   const { translate, isTranslating, error } = useTranslation();
 
   const handleTranslate = async () => {
-    // Parse glossary
+    // Parse glossary (split only on first "=" to handle values with "=")
     let glossary = null;
     if (mode === 'glossary' && glossaryText.trim()) {
       glossary = {};
       glossaryText.split('\n').forEach(line => {
-        const parts = line.split('=').map(s => s.trim());
-        if (parts.length === 2 && parts[0] && parts[1]) {
-          glossary[parts[0]] = parts[1];
+        const eqIdx = line.indexOf('=');
+        if (eqIdx > 0) {
+          const key = line.substring(0, eqIdx).trim();
+          const value = line.substring(eqIdx + 1).trim();
+          if (key && value) {
+            glossary[key] = value;
+          }
         }
       });
     }
@@ -67,7 +71,11 @@ export default function TranslationConfig({
       hybrid_refine: provider === 'hybrid' ? hybridRefine : false,
     };
 
-    onTranslationStart();
+    onTranslationStart({
+      provider,
+      llmModel,
+      targetLang: 'vi',
+    });
 
     try {
       const result = await translate(request);

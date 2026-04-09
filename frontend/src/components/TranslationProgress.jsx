@@ -1,7 +1,7 @@
 import React from 'react';
-import { Loader2 } from 'lucide-react';
+import { Loader2, XCircle } from 'lucide-react';
 
-export default function TranslationProgress({ progress, fileData }) {
+export default function TranslationProgress({ progress, fileData, onCancel }) {
   const total = progress?.total || fileData?.total_entries || 0;
   const completed = progress?.completed || 0;
   const percent = total > 0 ? Math.round((completed / total) * 100) : 0;
@@ -44,6 +44,17 @@ export default function TranslationProgress({ progress, fileData }) {
           <div className="bg-red-50 rounded-lg p-3 mt-4 text-red-600 text-sm">
             Lỗi: {progress.error}
           </div>
+        )}
+
+        {/* Cancel button */}
+        {onCancel && status !== 'completed' && status !== 'error' && (
+          <button
+            onClick={onCancel}
+            className="mt-6 inline-flex items-center gap-2 text-sm text-gray-500 hover:text-red-600 transition-colors"
+          >
+            <XCircle className="w-4 h-4" />
+            Hủy dịch
+          </button>
         )}
       </div>
     </div>

@@ -11,11 +11,23 @@ export default function App() {
   const [step, setStep] = useState('upload'); // upload, config, translating, preview
   const [fileData, setFileData] = useState(null);
   const [models, setModels] = useState(null);
+  const [modelsError, setModelsError] = useState(null);
   const [translationResult, setTranslationResult] = useState(null);
   const [translationProgress, setTranslationProgress] = useState(null);
+  // Track user's translation config for retranslation
+  const [translationConfig, setTranslationConfig] = useState({
+    provider: 'llm',
+    llmModel: 'gpt-4o-mini',
+    targetLang: 'vi',
+  });
 
   useEffect(() => {
-    getModels().then(setModels).catch(console.error);
+    getModels()
+      .then(setModels)
+      .catch((err) => {
+        console.error('Failed to fetch models:', err);
+        setModelsError('Không thể tải danh sách models. Kiểm tra kết nối backend.');
+      });
   }, []);
 
   const handleFileUploaded = (data) => {
@@ -24,7 +36,10 @@ export default function App() {
     setStep('config');
   };
 
-  const handleTranslationStart = () => {
+  const handleTranslationStart = (config) => {
+    if (config) {
+      setTranslationConfig(config);
+    }
     setStep('translating');
   };
 
@@ -37,7 +52,15 @@ export default function App() {
     setTranslationProgress(progress);
   };
 
+  const handleCancel = () => {
+    setStep('config');
+    setTranslationProgress(null);
+  };
+
   const handleReset = () => {
+    if (fileData && !window.confirm('Bạn có chắc muốn bắt đầu lại? Dữ liệu hiện tại sẽ bị mất.')) {
+      return;
+    }
     setFileData(null);
     setTranslationResult(null);
     setTranslationProgress(null);
@@ -75,6 +98,13 @@ export default function App() {
           })}
         </div>
 
+        {/* Models error banner */}
+        {modelsError && (
+          <div className="max-w-2xl mx-auto mb-4 bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-yellow-700 text-sm">
+            {modelsError}
+          </div>
+        )}
+
         {/* Main content */}
         {step === 'upload' && (
           <FileUpload onFileUploaded={handleFileUploaded} />
@@ -95,6 +125,7 @@ export default function App() {
           <TranslationProgress
             progress={translationProgress}
             fileData={fileData}
+            onCancel={handleCancel}
           />
         )}
 
@@ -104,8 +135,13 @@ export default function App() {
               fileId={fileData.file_id}
               entries={translationResult.entries}
               models={models}
+              translationConfig={translationConfig}
             />
-            <ExportPanel fileId={fileData.file_id} filename={fileData.filename} />
+            <ExportPanel
+              fileId={fileData.file_id}
+              filename={fileData.filename}
+              targetLang={translationConfig.targetLang}
+            />
           </div>
         )}
       </main>

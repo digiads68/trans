@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from typing import Callable, Optional
 
 from openai import AsyncOpenAI
@@ -10,6 +11,15 @@ from app.models.schemas import SubtitleEntry, TranslationMode
 from .base import BaseTranslator
 
 logger = logging.getLogger(__name__)
+
+LANG_MAP = {
+    "vi": "Vietnamese", "en": "English", "zh": "Chinese",
+    "zh-cn": "Chinese", "zh-tw": "Chinese (Traditional)",
+    "ko": "Korean", "ja": "Japanese",
+    "th": "Thai", "fr": "French", "de": "German", "es": "Spanish",
+    "pt": "Portuguese", "ru": "Russian", "ar": "Arabic",
+    "id": "Indonesian", "ms": "Malay",
+}
 
 
 class LLMTranslator(BaseTranslator):
@@ -41,13 +51,8 @@ class LLMTranslator(BaseTranslator):
         custom_prompt: Optional[str] = None,
         glossary: Optional[dict[str, str]] = None,
     ) -> str:
-        lang_map = {
-            "vi": "Vietnamese", "en": "English", "zh": "Chinese",
-            "zh-cn": "Chinese", "ko": "Korean", "ja": "Japanese",
-            "th": "Thai", "fr": "French", "de": "German", "es": "Spanish",
-        }
-        source = lang_map.get(source_lang, source_lang)
-        target = lang_map.get(target_lang, target_lang)
+        source = LANG_MAP.get(source_lang, source_lang)
+        target = LANG_MAP.get(target_lang, target_lang)
 
         base_prompt = (
             f"You are an expert subtitle translator. "
@@ -84,12 +89,8 @@ class LLMTranslator(BaseTranslator):
 
     async def translate_text(self, text: str, source_lang: str, target_lang: str) -> str:
         """Translate a single text using LLM."""
-        lang_map = {
-            "vi": "Vietnamese", "en": "English", "zh": "Chinese",
-            "ko": "Korean", "ja": "Japanese",
-        }
-        source = lang_map.get(source_lang, source_lang)
-        target = lang_map.get(target_lang, target_lang)
+        source = LANG_MAP.get(source_lang, source_lang)
+        target = LANG_MAP.get(target_lang, target_lang)
 
         response = await self.client.chat.completions.create(
             model=self.model,
@@ -101,10 +102,63 @@ class LLMTranslator(BaseTranslator):
         )
         return response.choices[0].message.content.strip()
 
+    async def refine_text(self, original: str, rough_translation: str, source_lang: str, target_lang: str) -> str:
+        """Refine a rough translation using LLM with a dedicated refine prompt."""
+        source = LANG_MAP.get(source_lang, source_lang)
+        target = LANG_MAP.get(target_lang, target_lang)
+
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        f"You are a translation editor. Improve machine translations from {source} to {target}. "
+                        f"Make them sound natural while preserving meaning. Keep it concise for subtitles. "
+                        f"Return ONLY the improved translation, nothing else."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Original: {original}\nMachine translation: {rough_translation}",
+                },
+            ],
+            temperature=0.3,
+        )
+        return response.choices[0].message.content.strip()
+
+    def _extract_json_array(self, text: str) -> list[dict]:
+        """Robustly extract JSON array from LLM response."""
+        # Try direct parse first
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # Try extracting from markdown code block
+        md_match = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
+        if md_match:
+            try:
+                return json.loads(md_match.group(1).strip())
+            except json.JSONDecodeError:
+                pass
+
+        # Try finding JSON array in text
+        arr_match = re.search(r"\[.*\]", text, re.DOTALL)
+        if arr_match:
+            try:
+                return json.loads(arr_match.group(0))
+            except json.JSONDecodeError:
+                pass
+
+        raise json.JSONDecodeError("No valid JSON array found", text, 0)
+
     async def _translate_chunk(
         self,
         entries: list[SubtitleEntry],
         system_prompt: str,
+        source_lang: str,
+        target_lang: str,
         context_before: Optional[list[SubtitleEntry]] = None,
     ) -> list[SubtitleEntry]:
         """Translate a chunk of entries."""
@@ -139,11 +193,7 @@ class LLMTranslator(BaseTranslator):
             )
 
             result_text = response.choices[0].message.content.strip()
-            # Clean up potential markdown formatting
-            if result_text.startswith("```"):
-                result_text = result_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-
-            result_data = json.loads(result_text)
+            result_data = self._extract_json_array(result_text)
 
             # Map translations back
             translation_map = {item["i"]: item["t"] for item in result_data}
@@ -153,11 +203,11 @@ class LLMTranslator(BaseTranslator):
 
         except (json.JSONDecodeError, KeyError) as e:
             logger.warning(f"Failed to parse LLM response, falling back to line-by-line: {e}")
-            # Fallback: translate one by one
+            # Fallback: translate one by one with correct languages
             for entry in entries:
                 try:
                     entry.translated_text = await self.translate_text(
-                        entry.original_text, "auto", "vi"
+                        entry.original_text, source_lang, target_lang
                     )
                 except Exception as inner_e:
                     logger.error(f"Failed to translate entry {entry.index}: {inner_e}")
@@ -175,7 +225,7 @@ class LLMTranslator(BaseTranslator):
         source_lang: str,
         target_lang: str,
         mode: TranslationMode = TranslationMode.STANDARD,
-        on_progress: Optional[Callable[[int, int, str], None]] = None,
+        on_progress=None,
         custom_prompt: Optional[str] = None,
         glossary: Optional[dict[str, str]] = None,
     ) -> list[SubtitleEntry]:
@@ -201,12 +251,14 @@ class LLMTranslator(BaseTranslator):
                     prev_end = chunk_idx * self.batch_size
                     context = entries[prev_start:prev_end]
 
-                result = await self._translate_chunk(chunk, system_prompt, context)
+                result = await self._translate_chunk(
+                    chunk, system_prompt, source_lang, target_lang, context
+                )
                 completed += len(chunk)
 
                 if on_progress:
                     last_text = chunk[-1].original_text[:50] if chunk else ""
-                    on_progress(completed, total, last_text)
+                    await on_progress(completed, total, last_text)
 
                 return result
 

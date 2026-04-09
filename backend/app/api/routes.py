@@ -1,8 +1,7 @@
 import os
 import uuid
-import json
 import logging
-from typing import Optional
+import time
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect, Query
 from fastapi.responses import FileResponse
@@ -13,7 +12,6 @@ from app.models.schemas import (
     TranslationResponse,
     UploadResponse,
     AvailableModelsResponse,
-    SubtitleEntry,
     FileType,
     TranslationProvider,
     TranslationMode,
@@ -28,7 +26,7 @@ from app.api.websocket import manager
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# In-memory store for uploaded files and their entries
+# In-memory store for uploaded files and their entries (with TTL cleanup in main.py)
 file_store: dict[str, dict] = {}
 
 
@@ -63,6 +61,14 @@ async def upload_file(file: UploadFile = File(...)):
     file_id = str(uuid.uuid4())[:8]
     content = await file.read()
 
+    # Check file size
+    if len(content) > settings.MAX_UPLOAD_SIZE:
+        max_mb = settings.MAX_UPLOAD_SIZE // 1_000_000
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size: {max_mb}MB",
+        )
+
     # Save uploaded file
     upload_path = os.path.join(settings.UPLOAD_DIR, f"{file_id}_{file.filename}")
     with open(upload_path, "wb") as f:
@@ -79,7 +85,7 @@ async def upload_file(file: UploadFile = File(...)):
     texts = [e.original_text for e in entries]
     detected_lang = detect_language_from_entries(texts)
 
-    # Store in memory
+    # Store in memory with TTL tracking
     file_type = FileType.SRT if ext == "srt" else FileType.EXCEL
     file_store[file_id] = {
         "filename": file.filename,
@@ -87,6 +93,7 @@ async def upload_file(file: UploadFile = File(...)):
         "entries": entries,
         "detected_lang": detected_lang,
         "upload_path": upload_path,
+        "created_at": time.time(),
     }
 
     return UploadResponse(
@@ -148,8 +155,6 @@ async def translate_file(request: TranslationRequest):
         raise HTTPException(status_code=400, detail=f"Failed to create translator: {str(e)}")
 
     # Progress callback that sends WebSocket updates
-    import asyncio
-
     async def on_progress(completed: int, total: int, current_text: str):
         await manager.send_progress(request.file_id, {
             "type": "progress",
@@ -159,13 +164,6 @@ async def translate_file(request: TranslationRequest):
             "current_text": current_text,
             "status": "processing",
         })
-
-    def sync_progress(completed: int, total: int, current_text: str):
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(on_progress(completed, total, current_text))
-        except RuntimeError:
-            pass
 
     # Translate
     try:
@@ -182,7 +180,7 @@ async def translate_file(request: TranslationRequest):
             source_lang=source_lang,
             target_lang=request.target_lang,
             mode=request.mode,
-            on_progress=sync_progress,
+            on_progress=on_progress,
             custom_prompt=request.custom_prompt,
             glossary=request.glossary,
         )
@@ -271,6 +269,7 @@ async def update_entry(file_id: str, entry_index: int, translated_text: str):
 async def export_file(
     file_id: str,
     format: str = Query("srt", regex="^(srt|xlsx|excel)$"),
+    target_lang: str = Query("vi"),
 ):
     """Export translated file in desired format."""
     if file_id not in file_store:
@@ -286,7 +285,7 @@ async def export_file(
 
     exporter = ExporterFactory.get_exporter(format)
     base_name = file_data["filename"].rsplit(".", 1)[0]
-    output_filename = f"{base_name}_vi.{exporter.file_extension()}"
+    output_filename = f"{base_name}_{target_lang}.{exporter.file_extension()}"
     output_path = os.path.join(settings.OUTPUT_DIR, f"{file_id}_{output_filename}")
 
     await exporter.export(entries, output_path)

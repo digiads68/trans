@@ -1,15 +1,17 @@
 from pydantic_settings import BaseSettings
-from typing import Optional
 import os
 
 
 class Settings(BaseSettings):
     APP_NAME: str = "SubTranslator"
     APP_VERSION: str = "1.0.0"
-    DEBUG: bool = True
+    DEBUG: bool = False
 
     UPLOAD_DIR: str = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "uploads")
     OUTPUT_DIR: str = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "outputs")
+
+    # CORS origins (comma-separated in env, e.g. "http://localhost:5173,http://localhost:3000")
+    CORS_ORIGINS: list[str] = ["http://localhost:5173", "http://localhost:3000"]
 
     # ClipProxy API (OpenAI-compatible)
     CLIPROXY_API_BASE: str = "https://api.cliproxyapi.com/v1"
@@ -36,6 +38,13 @@ class Settings(BaseSettings):
     DEFAULT_TARGET_LANG: str = "vi"
     BATCH_SIZE: int = 20
     MAX_CONCURRENT_REQUESTS: int = 5
+
+    # Upload limits
+    MAX_UPLOAD_SIZE: int = 50_000_000  # 50MB
+
+    # File store TTL (seconds)
+    FILE_STORE_TTL: int = 7200  # 2 hours
+    FILE_CLEANUP_INTERVAL: int = 1800  # 30 minutes
 
     # Future: Video integration plugins
     PLUGINS_DIR: str = "plugins"

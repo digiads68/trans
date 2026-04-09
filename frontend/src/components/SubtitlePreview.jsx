@@ -2,15 +2,21 @@ import React, { useState } from 'react';
 import { Edit3, Check, X, RefreshCw } from 'lucide-react';
 import { retranslateEntry, updateEntry } from '../services/api';
 
-export default function SubtitlePreview({ fileId, entries, models }) {
+export default function SubtitlePreview({ fileId, entries, models, translationConfig }) {
   const [editingIndex, setEditingIndex] = useState(null);
   const [editText, setEditText] = useState('');
   const [localEntries, setLocalEntries] = useState(entries);
   const [retranslating, setRetranslating] = useState(null);
+  const [notification, setNotification] = useState(null);
   const [page, setPage] = useState(1);
   const pageSize = 30;
   const totalPages = Math.ceil(localEntries.length / pageSize);
   const visibleEntries = localEntries.slice((page - 1) * pageSize, page * pageSize);
+
+  const showNotification = (msg, type = 'success') => {
+    setNotification({ msg, type });
+    setTimeout(() => setNotification(null), 3000);
+  };
 
   const handleEdit = (entry) => {
     setEditingIndex(entry.index);
@@ -23,21 +29,27 @@ export default function SubtitlePreview({ fileId, entries, models }) {
       setLocalEntries(prev =>
         prev.map(e => e.index === entry.index ? { ...e, translated_text: editText } : e)
       );
+      showNotification('Đã lưu');
     } catch (err) {
-      console.error(err);
+      showNotification('Lưu thất bại', 'error');
     }
     setEditingIndex(null);
   };
 
   const handleRetranslate = async (entry) => {
     setRetranslating(entry.index);
+    const provider = translationConfig?.provider || 'llm';
+    const model = translationConfig?.llmModel || 'gpt-4o-mini';
+    const targetLang = translationConfig?.targetLang || 'vi';
+
     try {
-      const result = await retranslateEntry(fileId, entry.index, 'llm', 'gpt-4o-mini', 'vi');
+      const result = await retranslateEntry(fileId, entry.index, provider, model, targetLang);
       setLocalEntries(prev =>
         prev.map(e => e.index === entry.index ? { ...e, translated_text: result.translated_text } : e)
       );
+      showNotification('Đã dịch lại');
     } catch (err) {
-      console.error(err);
+      showNotification('Dịch lại thất bại', 'error');
     }
     setRetranslating(null);
   };
@@ -46,8 +58,15 @@ export default function SubtitlePreview({ fileId, entries, models }) {
     <div className="card">
       <div className="flex items-center justify-between mb-4">
         <h3 className="font-semibold text-lg">Kết quả dịch ({localEntries.length} dòng)</h3>
-        <div className="text-sm text-gray-500">
-          Trang {page}/{totalPages}
+        <div className="flex items-center gap-3">
+          {notification && (
+            <span className={`text-sm px-2 py-1 rounded ${
+              notification.type === 'error' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'
+            }`}>
+              {notification.msg}
+            </span>
+          )}
+          <span className="text-sm text-gray-500">Trang {page}/{totalPages}</span>
         </div>
       </div>
 
@@ -110,7 +129,7 @@ export default function SubtitlePreview({ fileId, entries, models }) {
                     <button
                       onClick={() => handleRetranslate(entry)}
                       disabled={retranslating === entry.index}
-                      className="p-1 text-gray-400 hover:text-purple-600 transition-colors disabled:animate-spin"
+                      className="p-1 text-gray-400 hover:text-purple-600 transition-colors"
                       title="Dịch lại"
                     >
                       <RefreshCw className={`w-3.5 h-3.5 ${retranslating === entry.index ? 'animate-spin' : ''}`} />

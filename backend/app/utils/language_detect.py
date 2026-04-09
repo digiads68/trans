@@ -45,9 +45,20 @@ def detect_language(text: str) -> str | None:
 
 
 def detect_language_from_entries(texts: list[str]) -> str | None:
-    """Detect language from a list of subtitle texts by sampling."""
-    # Sample up to 10 entries for more accurate detection
-    sample = texts[:10] if len(texts) > 10 else texts
+    """Detect language from a list of subtitle texts by sampling evenly."""
+    if not texts:
+        return None
+    # Sample evenly from beginning, middle, and end for better accuracy
+    n = len(texts)
+    if n <= 15:
+        sample = texts
+    else:
+        indices = (
+            list(range(0, 5))  # first 5
+            + [n // 4, n // 3, n // 2, n * 2 // 3, n * 3 // 4]  # spread through middle
+            + list(range(max(n - 5, 5), n))  # last 5
+        )
+        sample = [texts[i] for i in sorted(set(indices)) if i < n]
     combined = " ".join(sample)
     return detect_language(combined)
 
