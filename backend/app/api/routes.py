@@ -3,8 +3,9 @@ import uuid
 import logging
 import time
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect, Query, Body
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from app.config import settings
 from app.models.schemas import (
@@ -21,7 +22,16 @@ from app.services.parser import ParserFactory
 from app.services.translator import TranslatorFactory
 from app.services.exporter import ExporterFactory
 from app.utils.language_detect import detect_language_from_entries
+from app.services.cache import get_cache_stats
 from app.api.websocket import manager
+
+# Lazy import to avoid circular dependency with main.py
+def _get_plugin_manager():
+    try:
+        from app.main import plugin_manager
+        return plugin_manager
+    except ImportError:
+        return None
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -35,14 +45,63 @@ async def health_check():
     return HealthResponse(status="ok", version=settings.APP_VERSION)
 
 
+# Runtime model list (starts from settings, can be updated via API)
+_runtime_models: list[str] = list(settings.AVAILABLE_LLM_MODELS)
+
+
+class ModelUpdateRequest(BaseModel):
+    models: list[str]
+
+
 @router.get("/models", response_model=AvailableModelsResponse)
 async def get_available_models():
     """Get available translation models and providers."""
     return AvailableModelsResponse(
-        llm_models=settings.AVAILABLE_LLM_MODELS,
+        llm_models=_runtime_models,
         providers=[p.value for p in TranslationProvider],
         modes=[m.value for m in TranslationMode],
     )
+
+
+@router.put("/models")
+async def update_available_models(body: ModelUpdateRequest):
+    """Update the runtime list of available LLM models (admin endpoint)."""
+    global _runtime_models
+    if not body.models:
+        raise HTTPException(status_code=400, detail="models list cannot be empty")
+    _runtime_models = [m.strip() for m in body.models if m.strip()]
+    return {"models": _runtime_models}
+
+
+@router.post("/models/add")
+async def add_model(model: str = Body(..., embed=True)):
+    """Add a model to the runtime list."""
+    global _runtime_models
+    model = model.strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="model name cannot be empty")
+    if model not in _runtime_models:
+        _runtime_models.append(model)
+    return {"models": _runtime_models}
+
+
+@router.delete("/models/{model_name}")
+async def remove_model(model_name: str):
+    """Remove a model from the runtime list."""
+    global _runtime_models
+    if model_name not in _runtime_models:
+        raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found")
+    if len(_runtime_models) == 1:
+        raise HTTPException(status_code=400, detail="Cannot remove the last model")
+    _runtime_models.remove(model_name)
+    return {"models": _runtime_models}
+
+
+@router.get("/cache/stats")
+async def cache_stats():
+    """Get translation memory cache statistics."""
+    stats = await get_cache_stats()
+    return stats
 
 
 @router.post("/upload", response_model=UploadResponse)
@@ -52,10 +111,10 @@ async def upload_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="No file provided")
 
     ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
-    if ext not in ("srt", "xlsx", "xls"):
+    if ext not in ("srt", "xlsx", "xls", "ass", "ssa", "vtt"):
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported file format: .{ext}. Supported: .srt, .xlsx, .xls",
+            detail=f"Unsupported file format: .{ext}. Supported: .srt, .xlsx, .xls, .ass, .ssa, .vtt",
         )
 
     file_id = str(uuid.uuid4())[:8]
@@ -86,7 +145,14 @@ async def upload_file(file: UploadFile = File(...)):
     detected_lang = detect_language_from_entries(texts)
 
     # Store in memory with TTL tracking
-    file_type = FileType.SRT if ext == "srt" else FileType.EXCEL
+    if ext == "srt":
+        file_type = FileType.SRT
+    elif ext in ("xlsx", "xls"):
+        file_type = FileType.EXCEL
+    elif ext in ("ass", "ssa"):
+        file_type = FileType.ASS
+    else:
+        file_type = FileType.VTT
     file_store[file_id] = {
         "filename": file.filename,
         "file_type": file_type,
@@ -95,6 +161,16 @@ async def upload_file(file: UploadFile = File(...)):
         "upload_path": upload_path,
         "created_at": time.time(),
     }
+
+    # Notify plugins
+    pm = _get_plugin_manager()
+    if pm:
+        await pm.emit_file_uploaded(
+            file_id=file_id,
+            filename=file.filename,
+            entries=entries,
+            metadata={"detected_lang": detected_lang, "entry_count": len(entries)},
+        )
 
     return UploadResponse(
         file_id=file_id,
@@ -166,6 +242,16 @@ async def translate_file(request: TranslationRequest):
         })
 
     # Translate
+    import time as _time
+    _start_ts = _time.time()
+    pm = _get_plugin_manager()
+    translation_meta = {
+        "source_lang": source_lang,
+        "target_lang": request.target_lang,
+        "provider": translator.provider_name,
+        "mode": request.mode.value if hasattr(request.mode, "value") else str(request.mode),
+    }
+
     try:
         await manager.send_progress(request.file_id, {
             "type": "start",
@@ -174,6 +260,9 @@ async def translate_file(request: TranslationRequest):
             "provider": translator.provider_name,
             "status": "processing",
         })
+
+        if pm:
+            await pm.emit_translation_start(request.file_id, entries, translation_meta)
 
         translated_entries = await translator.translate_batch(
             entries=entries,
@@ -187,6 +276,13 @@ async def translate_file(request: TranslationRequest):
 
         # Update store
         file_store[request.file_id]["entries"] = translated_entries
+
+        if pm:
+            await pm.emit_translation_complete(
+                request.file_id,
+                translated_entries,
+                {**translation_meta, "duration_seconds": round(_time.time() - _start_ts, 2)},
+            )
 
         await manager.send_progress(request.file_id, {
             "type": "complete",
@@ -268,7 +364,7 @@ async def update_entry(file_id: str, entry_index: int, translated_text: str):
 @router.get("/export/{file_id}")
 async def export_file(
     file_id: str,
-    format: str = Query("srt", regex="^(srt|xlsx|excel)$"),
+    format: str = Query("srt", regex="^(srt|xlsx|excel|vtt|premiere|davinci)$"),
     target_lang: str = Query("vi"),
 ):
     """Export translated file in desired format."""
@@ -289,6 +385,11 @@ async def export_file(
     output_path = os.path.join(settings.OUTPUT_DIR, f"{file_id}_{output_filename}")
 
     await exporter.export(entries, output_path)
+
+    # Notify plugins
+    pm = _get_plugin_manager()
+    if pm:
+        await pm.emit_export(file_id, format, output_path, entries)
 
     return FileResponse(
         path=output_path,

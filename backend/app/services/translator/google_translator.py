@@ -7,6 +7,7 @@ from deep_translator import GoogleTranslator as DeepGoogleTranslator
 
 from app.models.schemas import SubtitleEntry, TranslationMode
 from .base import BaseTranslator
+from app.services.cache import get_cached, set_cached
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,13 @@ class GoogleTranslator(BaseTranslator):
 
         for idx, entry in enumerate(entries):
             try:
-                translated = await self.translate_text(entry.original_text, source_lang, target_lang)
+                # Check cache first
+                cached = await get_cached(source_lang, target_lang, entry.original_text)
+                if cached is not None:
+                    translated = cached
+                else:
+                    translated = await self.translate_text(entry.original_text, source_lang, target_lang)
+                    await set_cached(source_lang, target_lang, entry.original_text, translated)
 
                 # Apply glossary post-processing if provided
                 if glossary and translated:
@@ -92,16 +99,16 @@ class GoogleTranslator(BaseTranslator):
 
             except asyncio.TimeoutError:
                 logger.error(f"Google Translate timeout for entry {entry.index}")
-                entry.translated_text = f"[Timeout error]"
+                entry.translated_text = "[Timeout error]"
             except Exception as e:
                 logger.error(f"Google Translate failed for entry {entry.index}: {e}")
-                entry.translated_text = f"[Translation error]"
+                entry.translated_text = "[Translation error]"
 
             if on_progress:
                 await on_progress(idx + 1, total, entry.original_text[:50])
 
-            # Small delay to avoid rate limiting
-            if (idx + 1) % self.batch_size == 0:
+            # Small delay to avoid rate limiting (skip if cache hit)
+            if (idx + 1) % self.batch_size == 0 and not cached:
                 await asyncio.sleep(0.5)
 
         return entries

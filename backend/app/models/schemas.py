@@ -18,6 +18,8 @@ class TranslationMode(str, Enum):
 class FileType(str, Enum):
     SRT = "srt"
     EXCEL = "excel"
+    ASS = "ass"
+    VTT = "vtt"
 
 
 class SubtitleEntry(BaseModel):

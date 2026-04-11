@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.api.routes import router, file_store
+from app.plugins.manager import PluginManager
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -58,10 +59,26 @@ async def cleanup_expired_files():
             logger.info(f"Cleanup: removed {len(expired)} expired files")
 
 
+# Plugin manager (singleton accessible to routes)
+plugin_manager = PluginManager(plugins_dir=settings.PLUGINS_DIR)
+
+
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(cleanup_expired_files())
+
+    # Discover and load plugins
+    count = plugin_manager.discover()
+    if count:
+        logger.info(f"Loaded {count} plugin(s)")
+    await plugin_manager.emit_startup()
+
     logger.info(f"{settings.APP_NAME} v{settings.APP_VERSION} started")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await plugin_manager.emit_shutdown()
 
 
 @app.get("/")

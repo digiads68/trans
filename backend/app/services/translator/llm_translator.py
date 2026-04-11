@@ -9,6 +9,7 @@ from openai import AsyncOpenAI
 from app.config import settings
 from app.models.schemas import SubtitleEntry, TranslationMode
 from .base import BaseTranslator
+from app.services.cache import get_cached, set_cached
 
 logger = logging.getLogger(__name__)
 
@@ -161,9 +162,27 @@ class LLMTranslator(BaseTranslator):
         target_lang: str,
         context_before: Optional[list[SubtitleEntry]] = None,
     ) -> list[SubtitleEntry]:
-        """Translate a chunk of entries."""
-        # Build input JSON
-        input_data = [{"i": e.index, "t": e.original_text} for e in entries]
+        """Translate a chunk of entries, using cache where possible."""
+        # Check cache first; only send uncached entries to LLM
+        cache_hits: dict[int, str] = {}
+        uncached: list[SubtitleEntry] = []
+        for entry in entries:
+            cached = await get_cached(source_lang, target_lang, entry.original_text)
+            if cached is not None:
+                cache_hits[entry.index] = cached
+            else:
+                uncached.append(entry)
+
+        # Apply cache hits
+        for entry in entries:
+            if entry.index in cache_hits:
+                entry.translated_text = cache_hits[entry.index]
+
+        if not uncached:
+            return entries
+
+        # Build input JSON only for uncached entries
+        input_data = [{"i": e.index, "t": e.original_text} for e in uncached]
 
         messages = [{"role": "system", "content": system_prompt}]
 
@@ -195,26 +214,28 @@ class LLMTranslator(BaseTranslator):
             result_text = response.choices[0].message.content.strip()
             result_data = self._extract_json_array(result_text)
 
-            # Map translations back
+            # Map translations back and store in cache
             translation_map = {item["i"]: item["t"] for item in result_data}
-            for entry in entries:
+            for entry in uncached:
                 if entry.index in translation_map:
                     entry.translated_text = translation_map[entry.index]
+                    await set_cached(source_lang, target_lang, entry.original_text, entry.translated_text)
 
         except (json.JSONDecodeError, KeyError) as e:
             logger.warning(f"Failed to parse LLM response, falling back to line-by-line: {e}")
             # Fallback: translate one by one with correct languages
-            for entry in entries:
+            for entry in uncached:
                 try:
                     entry.translated_text = await self.translate_text(
                         entry.original_text, source_lang, target_lang
                     )
+                    await set_cached(source_lang, target_lang, entry.original_text, entry.translated_text)
                 except Exception as inner_e:
                     logger.error(f"Failed to translate entry {entry.index}: {inner_e}")
                     entry.translated_text = f"[Translation error: {entry.index}]"
         except Exception as e:
             logger.error(f"Translation chunk failed: {e}")
-            for entry in entries:
+            for entry in uncached:
                 entry.translated_text = f"[Translation error]"
 
         return entries

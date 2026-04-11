@@ -11,8 +11,8 @@ export default function FileUpload({ onFileUploaded }) {
     if (!file) return;
 
     const ext = file.name.split('.').pop().toLowerCase();
-    if (!['srt', 'xlsx', 'xls'].includes(ext)) {
-      setError('Chỉ hỗ trợ file .srt, .xlsx, .xls');
+    if (!['srt', 'xlsx', 'xls', 'ass', 'ssa', 'vtt'].includes(ext)) {
+      setError('Chỉ hỗ trợ file .srt, .xlsx, .xls, .ass, .ssa, .vtt');
       return;
     }
 
@@ -60,7 +60,7 @@ export default function FileUpload({ onFileUploaded }) {
             id="file-input"
             type="file"
             className="hidden"
-            accept=".srt,.xlsx,.xls"
+            accept=".srt,.xlsx,.xls,.ass,.ssa,.vtt"
             onChange={(e) => handleFile(e.target.files[0])}
           />
 
@@ -77,10 +77,10 @@ export default function FileUpload({ onFileUploaded }) {
                   Kéo thả file vào đây hoặc nhấn để chọn
                 </p>
                 <p className="text-sm text-gray-500 mt-1">
-                  Hỗ trợ: SRT, Excel (.xlsx, .xls)
+                  Hỗ trợ: SRT, Excel (.xlsx, .xls), ASS/SSA, VTT
                 </p>
               </div>
-              <div className="flex gap-4 mt-2">
+              <div className="flex flex-wrap justify-center gap-3 mt-2">
                 <div className="flex items-center gap-1 text-sm text-gray-500">
                   <FileText className="w-4 h-4" />
                   <span>.srt</span>
@@ -88,6 +88,14 @@ export default function FileUpload({ onFileUploaded }) {
                 <div className="flex items-center gap-1 text-sm text-gray-500">
                   <FileSpreadsheet className="w-4 h-4" />
                   <span>.xlsx / .xls</span>
+                </div>
+                <div className="flex items-center gap-1 text-sm text-gray-500">
+                  <FileText className="w-4 h-4" />
+                  <span>.ass / .ssa</span>
+                </div>
+                <div className="flex items-center gap-1 text-sm text-gray-500">
+                  <FileText className="w-4 h-4" />
+                  <span>.vtt</span>
                 </div>
               </div>
             </div>
