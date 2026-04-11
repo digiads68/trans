@@ -8,10 +8,15 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from app.config import settings
+import asyncio
+import httpx
+
 from app.models.schemas import (
     TranslationRequest,
+    BatchTranslationRequest,
     TranslationResponse,
     UploadResponse,
+    BatchUploadResponse,
     AvailableModelsResponse,
     FileType,
     TranslationProvider,
@@ -182,6 +187,94 @@ async def upload_file(file: UploadFile = File(...)):
     )
 
 
+@router.post("/upload/batch", response_model=BatchUploadResponse)
+async def upload_files_batch(files: list[UploadFile] = File(...)):
+    """Upload multiple subtitle files at once. Returns list of parsed file metadata."""
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    if len(files) > 20:
+        raise HTTPException(status_code=400, detail="Maximum 20 files per batch")
+
+    results: list[UploadResponse] = []
+    total_entries = 0
+
+    for file in files:
+        if not file.filename:
+            continue
+        ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+        if ext not in ("srt", "xlsx", "xls", "ass", "ssa", "vtt"):
+            results.append(UploadResponse(
+                file_id="",
+                filename=file.filename,
+                file_type=FileType.SRT,
+                total_entries=0,
+                detected_lang=None,
+                entries=[],
+            ))
+            continue
+
+        file_id = str(uuid.uuid4())[:8]
+        content = await file.read()
+
+        if len(content) > settings.MAX_UPLOAD_SIZE:
+            continue  # Skip oversized files silently in batch
+
+        upload_path = os.path.join(settings.UPLOAD_DIR, f"{file_id}_{file.filename}")
+        with open(upload_path, "wb") as f:
+            f.write(content)
+
+        try:
+            parser = ParserFactory.get_parser(file.filename)
+            entries = await parser.parse(content, file.filename)
+        except Exception:
+            continue
+
+        detected_lang = detect_language_from_entries([e.original_text for e in entries])
+
+        if ext == "srt":
+            file_type = FileType.SRT
+        elif ext in ("xlsx", "xls"):
+            file_type = FileType.EXCEL
+        elif ext in ("ass", "ssa"):
+            file_type = FileType.ASS
+        else:
+            file_type = FileType.VTT
+
+        file_store[file_id] = {
+            "filename": file.filename,
+            "file_type": file_type,
+            "entries": entries,
+            "detected_lang": detected_lang,
+            "upload_path": upload_path,
+            "created_at": time.time(),
+        }
+
+        pm = _get_plugin_manager()
+        if pm:
+            await pm.emit_file_uploaded(
+                file_id=file_id,
+                filename=file.filename,
+                entries=entries,
+                metadata={"detected_lang": detected_lang, "entry_count": len(entries)},
+            )
+
+        total_entries += len(entries)
+        results.append(UploadResponse(
+            file_id=file_id,
+            filename=file.filename,
+            file_type=file_type,
+            entries=entries[:5],
+            detected_lang=detected_lang,
+            total_entries=len(entries),
+        ))
+
+    return BatchUploadResponse(
+        files=results,
+        total_files=len(results),
+        total_entries=total_entries,
+    )
+
+
 @router.get("/file/{file_id}/entries")
 async def get_file_entries(
     file_id: str,
@@ -292,7 +385,7 @@ async def translate_file(request: TranslationRequest):
             "status": "completed",
         })
 
-        return TranslationResponse(
+        response = TranslationResponse(
             file_id=request.file_id,
             original_file=file_data["filename"],
             entries=translated_entries,
@@ -303,6 +396,12 @@ async def translate_file(request: TranslationRequest):
             status="completed",
         )
 
+        # Fire webhook if requested (non-blocking)
+        if request.webhook_url:
+            asyncio.create_task(_fire_webhook(request.webhook_url, response.model_dump()))
+
+        return response
+
     except Exception as e:
         logger.error(f"Translation failed: {e}")
         await manager.send_progress(request.file_id, {
@@ -312,6 +411,129 @@ async def translate_file(request: TranslationRequest):
             "status": "error",
         })
         raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
+
+
+async def _fire_webhook(url: str, payload: dict) -> None:
+    """Send webhook notification with translation result. Errors are logged, not raised."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(url, json=payload)
+            if resp.status_code >= 400:
+                logger.warning(f"Webhook {url} returned {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"Webhook delivery failed ({url}): {e}")
+
+
+@router.post("/translate/batch")
+async def translate_files_batch(request: BatchTranslationRequest):
+    """
+    Translate multiple uploaded files with a single set of settings.
+    Returns list of translation results.
+    Sequential by default; set parallel=true for concurrent translation.
+    """
+    if not request.file_ids:
+        raise HTTPException(status_code=400, detail="file_ids cannot be empty")
+
+    missing = [fid for fid in request.file_ids if fid not in file_store]
+    if missing:
+        raise HTTPException(status_code=404, detail=f"Files not found: {missing}")
+
+    async def _translate_one(file_id: str) -> dict:
+        file_data = file_store[file_id]
+        entries = file_data["entries"]
+        source_lang = request.source_lang or file_data.get("detected_lang", "auto")
+
+        translator = TranslatorFactory.create(
+            provider=request.provider,
+            model=request.llm_model,
+            api_base=settings.CLIPROXY_API_BASE,
+            api_key=settings.CLIPROXY_API_KEY,
+            hybrid_primary=request.hybrid_primary,
+            hybrid_fallback=request.hybrid_fallback,
+            hybrid_refine=request.hybrid_refine,
+        )
+
+        async def on_progress(completed: int, total: int, current_text: str):
+            await manager.send_progress(file_id, {
+                "type": "progress",
+                "file_id": file_id,
+                "completed": completed,
+                "total": total,
+                "current_text": current_text,
+                "status": "processing",
+            })
+
+        try:
+            await manager.send_progress(file_id, {
+                "type": "start",
+                "file_id": file_id,
+                "total": len(entries),
+                "provider": translator.provider_name,
+                "status": "processing",
+            })
+
+            translated = await translator.translate_batch(
+                entries=entries,
+                source_lang=source_lang,
+                target_lang=request.target_lang,
+                mode=request.mode,
+                on_progress=on_progress,
+                custom_prompt=request.custom_prompt,
+                glossary=request.glossary,
+            )
+
+            file_store[file_id]["entries"] = translated
+
+            await manager.send_progress(file_id, {
+                "type": "complete",
+                "file_id": file_id,
+                "completed": len(entries),
+                "total": len(entries),
+                "status": "completed",
+            })
+
+            return {
+                "file_id": file_id,
+                "filename": file_data["filename"],
+                "status": "completed",
+                "total_entries": len(translated),
+                "source_lang": source_lang,
+                "target_lang": request.target_lang,
+                "provider": translator.provider_name,
+            }
+
+        except Exception as e:
+            logger.error(f"Batch translate failed for {file_id}: {e}")
+            await manager.send_progress(file_id, {
+                "type": "error",
+                "file_id": file_id,
+                "error": str(e),
+                "status": "error",
+            })
+            return {
+                "file_id": file_id,
+                "filename": file_data.get("filename", ""),
+                "status": "error",
+                "error": str(e),
+            }
+
+    if request.parallel:
+        results = await asyncio.gather(*[_translate_one(fid) for fid in request.file_ids])
+    else:
+        results = []
+        for fid in request.file_ids:
+            results.append(await _translate_one(fid))
+
+    # Fire webhook if requested
+    if request.webhook_url:
+        asyncio.create_task(_fire_webhook(request.webhook_url, {"results": results}))
+
+    return {
+        "results": results,
+        "total_files": len(results),
+        "completed": sum(1 for r in results if r.get("status") == "completed"),
+        "failed": sum(1 for r in results if r.get("status") == "error"),
+    }
 
 
 @router.post("/translate/{file_id}/entry/{entry_index}")

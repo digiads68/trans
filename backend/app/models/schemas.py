@@ -44,6 +44,24 @@ class TranslationRequest(BaseModel):
     hybrid_primary: Optional[TranslationProvider] = TranslationProvider.LLM
     hybrid_fallback: Optional[TranslationProvider] = TranslationProvider.GOOGLE
     hybrid_refine: bool = False  # Use LLM to refine Google translation
+    # WebHook notification (5.6)
+    webhook_url: Optional[str] = None
+
+
+class BatchTranslationRequest(BaseModel):
+    file_ids: list[str]
+    provider: TranslationProvider = TranslationProvider.LLM
+    llm_model: Optional[str] = "gpt-4o-mini"
+    mode: TranslationMode = TranslationMode.STANDARD
+    source_lang: Optional[str] = None
+    target_lang: str = "vi"
+    custom_prompt: Optional[str] = None
+    glossary: Optional[dict[str, str]] = None
+    hybrid_primary: Optional[TranslationProvider] = TranslationProvider.LLM
+    hybrid_fallback: Optional[TranslationProvider] = TranslationProvider.GOOGLE
+    hybrid_refine: bool = False
+    webhook_url: Optional[str] = None
+    parallel: bool = False  # Translate files in parallel (False = sequential)
 
 
 class TranslationProgress(BaseModel):
@@ -74,6 +92,12 @@ class UploadResponse(BaseModel):
     entries: list[SubtitleEntry] = []
     detected_lang: Optional[str] = None
     total_entries: int = 0
+
+
+class BatchUploadResponse(BaseModel):
+    files: list[UploadResponse]
+    total_files: int
+    total_entries: int
 
 
 class AvailableModelsResponse(BaseModel):

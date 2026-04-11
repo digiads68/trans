@@ -7,11 +7,24 @@ const api = axios.create({
   timeout: 300000, // 5 min for large translations
 });
 
-export const uploadFile = async (file) => {
+export const uploadFile = async (file, onUploadProgress) => {
   const formData = new FormData();
   formData.append('file', file);
   const response = await api.post('/upload', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
+    onUploadProgress,
+  });
+  return response.data;
+};
+
+export const uploadFileBatch = async (files, onUploadProgress) => {
+  const formData = new FormData();
+  for (const file of files) {
+    formData.append('files', file);
+  }
+  const response = await api.post('/upload/batch', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    onUploadProgress,
   });
   return response.data;
 };
