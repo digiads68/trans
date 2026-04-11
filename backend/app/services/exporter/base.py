@@ -26,5 +26,17 @@ class ExporterFactory:
         elif format in ("xlsx", "excel"):
             from .excel_exporter import ExcelExporter
             return ExcelExporter()
+        elif format == "vtt":
+            from .vtt_exporter import VTTExporter
+            return VTTExporter()
+        elif format == "premiere":
+            from .premiere_exporter import PremiereExporter
+            return PremiereExporter()
+        elif format == "davinci":
+            from .davinci_exporter import DaVinciExporter
+            return DaVinciExporter()
+        elif format == "ass":
+            from .ass_exporter import ASSExporter
+            return ASSExporter()
         else:
             raise ValueError(f"Unsupported export format: {format}")

@@ -1,6 +1,9 @@
 from abc import ABC, abstractmethod
-from typing import AsyncGenerator, Callable, Optional
+from typing import Awaitable, Callable, Optional, Union
 from app.models.schemas import SubtitleEntry, TranslationProvider, TranslationMode
+
+# Progress callback: (completed, total, current_text) -> None or Awaitable[None]
+ProgressCallback = Optional[Callable[[int, int, str], Union[None, Awaitable[None]]]]
 
 
 class BaseTranslator(ABC):
@@ -13,7 +16,7 @@ class BaseTranslator(ABC):
         source_lang: str,
         target_lang: str,
         mode: TranslationMode = TranslationMode.STANDARD,
-        on_progress: Optional[Callable[[int, int, str], None]] = None,
+        on_progress: ProgressCallback = None,
         custom_prompt: Optional[str] = None,
         glossary: Optional[dict[str, str]] = None,
     ) -> list[SubtitleEntry]:

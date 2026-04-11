@@ -38,28 +38,23 @@ class HybridTranslator(BaseTranslator):
         try:
             result = await self.primary.translate_text(text, source_lang, target_lang)
             if self.use_refine and result:
-                result = await self._refine_translation(text, result, source_lang, target_lang)
+                result = await self._refine_single(text, result, source_lang, target_lang)
             return result
         except Exception as e:
             logger.warning(f"Primary translator failed, using fallback: {e}")
             return await self.refiner.translate_text(text, source_lang, target_lang)
 
-    async def _refine_translation(
+    async def _refine_single(
         self, original: str, rough_translation: str, source_lang: str, target_lang: str
     ) -> str:
         """Use the refiner to improve a rough translation."""
         from .llm_translator import LLMTranslator
 
         if isinstance(self.refiner, LLMTranslator):
-            refine_prompt = (
-                f"The following is a machine translation. "
-                f"Improve it to sound more natural while keeping the meaning.\n"
-                f"Original ({source_lang}): {original}\n"
-                f"Machine translation: {rough_translation}\n"
-                f"Provide ONLY the improved translation, nothing else."
-            )
             try:
-                return await self.refiner.translate_text(refine_prompt, source_lang, target_lang)
+                return await self.refiner.refine_text(
+                    original, rough_translation, source_lang, target_lang
+                )
             except Exception as e:
                 logger.warning(f"Refine failed, using rough translation: {e}")
                 return rough_translation
@@ -81,12 +76,13 @@ class HybridTranslator(BaseTranslator):
         # Step 1: Primary translation
         logger.info(f"Hybrid step 1: Translating with {self.primary.provider_name}")
 
-        def primary_progress(completed, tot, text):
+        async def primary_progress(completed, tot, text):
             if on_progress:
                 if self.use_refine:
-                    on_progress(completed // 2, total, f"[Primary] {text}")
+                    # Primary phase = first half of progress
+                    await on_progress(completed * total // (2 * tot) if tot > 0 else 0, total, f"[Primary] {text}")
                 else:
-                    on_progress(completed, total, text)
+                    await on_progress(completed, total, text)
 
         try:
             entries = await self.primary.translate_batch(
@@ -111,10 +107,11 @@ class HybridTranslator(BaseTranslator):
             from .llm_translator import LLMTranslator
 
             if isinstance(self.refiner, LLMTranslator):
+                half = total // 2
                 for idx, entry in enumerate(entries):
                     if entry.translated_text and not entry.translated_text.startswith("[Translation error"):
                         try:
-                            refined = await self._refine_translation(
+                            refined = await self.refiner.refine_text(
                                 entry.original_text,
                                 entry.translated_text,
                                 source_lang,
@@ -125,10 +122,7 @@ class HybridTranslator(BaseTranslator):
                             logger.warning(f"Refine failed for entry {entry.index}: {e}")
 
                     if on_progress:
-                        on_progress(
-                            total // 2 + idx + 1,
-                            total,
-                            f"[Refine] {entry.original_text[:50]}",
-                        )
+                        # Refine phase = second half, capped at total
+                        await on_progress(min(half + idx + 1, total), total, f"[Refine] {entry.original_text[:50]}")
 
         return entries

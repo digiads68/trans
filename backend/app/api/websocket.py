@@ -1,8 +1,8 @@
-import asyncio
 import json
 import logging
-from typing import Optional
+
 from fastapi import WebSocket
+from starlette.websockets import WebSocketState
 
 logger = logging.getLogger(__name__)
 
@@ -27,19 +27,22 @@ class ConnectionManager:
             ]
             if not self.active_connections[file_id]:
                 del self.active_connections[file_id]
-        logger.info(f"WebSocket disconnected for file_id: {file_id}")
+        logger.debug(f"WebSocket disconnected for file_id: {file_id}")
 
     async def send_progress(self, file_id: str, data: dict):
-        if file_id in self.active_connections:
-            message = json.dumps(data, ensure_ascii=False)
-            disconnected = []
-            for ws in self.active_connections[file_id]:
-                try:
+        if file_id not in self.active_connections:
+            return
+        message = json.dumps(data, ensure_ascii=False)
+        disconnected = []
+        for ws in self.active_connections[file_id]:
+            try:
+                if ws.client_state == WebSocketState.CONNECTED:
                     await ws.send_text(message)
-                except Exception:
-                    disconnected.append(ws)
-            for ws in disconnected:
-                self.disconnect(ws, file_id)
+            except (RuntimeError, ConnectionError, OSError) as e:
+                logger.warning(f"WebSocket send failed for {file_id}: {e}")
+                disconnected.append(ws)
+        for ws in disconnected:
+            self.disconnect(ws, file_id)
 
 
 manager = ConnectionManager()

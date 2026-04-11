@@ -35,5 +35,11 @@ class ParserFactory:
         elif ext in ("xlsx", "xls"):
             from .excel_parser import ExcelParser
             return ExcelParser()
+        elif ext in ("ass", "ssa"):
+            from .ass_parser import ASSParser
+            return ASSParser()
+        elif ext == "vtt":
+            from .vtt_parser import VTTParser
+            return VTTParser()
         else:
-            raise ValueError(f"Unsupported file format: .{ext}. Supported: .srt, .xlsx, .xls")
+            raise ValueError(f"Unsupported file format: .{ext}. Supported: .srt, .xlsx, .xls, .ass, .ssa, .vtt")
