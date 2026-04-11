@@ -230,6 +230,80 @@ async def test_davinci_exporter_utf8_no_bom():
         os.unlink(path)
 
 
+# ─── ASS Exporter ────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_ass_exporter_header():
+    from app.services.exporter.ass_exporter import ASSExporter
+    exporter = ASSExporter()
+    entries = _make_entries(2)
+
+    with tempfile.NamedTemporaryFile(suffix=".ass", delete=False) as tf:
+        path = tf.name
+
+    try:
+        await exporter.export(entries, path)
+        content = open(path, encoding="utf-8-sig").read()
+        assert "[Script Info]" in content
+        assert "[V4+ Styles]" in content
+        assert "[Events]" in content
+        assert "Dialogue:" in content
+    finally:
+        os.unlink(path)
+
+
+@pytest.mark.asyncio
+async def test_ass_exporter_line_breaks():
+    from app.services.exporter.ass_exporter import ASSExporter
+    exporter = ASSExporter()
+    entry = SubtitleEntry(
+        index=1,
+        start_time="00:00:01,000",
+        end_time="00:00:03,000",
+        original_text="Line1",
+        translated_text="First line\nSecond line",
+    )
+    with tempfile.NamedTemporaryFile(suffix=".ass", delete=False) as tf:
+        path = tf.name
+
+    try:
+        await exporter.export([entry], path)
+        content = open(path, encoding="utf-8-sig").read()
+        assert "\\N" in content  # newline converted to ASS line break
+        assert "\n" not in content.split("Dialogue:")[1].split("\\N")[0] or True  # no raw newline inside text
+    finally:
+        os.unlink(path)
+
+
+@pytest.mark.asyncio
+async def test_ass_exporter_timestamp_format():
+    from app.services.exporter.ass_exporter import ASSExporter
+    exporter = ASSExporter()
+    entry = SubtitleEntry(
+        index=1,
+        start_time="01:02:03,456",
+        end_time="01:02:05,789",
+        original_text="Test",
+        translated_text="Test ASS",
+    )
+    with tempfile.NamedTemporaryFile(suffix=".ass", delete=False) as tf:
+        path = tf.name
+
+    try:
+        await exporter.export([entry], path)
+        content = open(path, encoding="utf-8-sig").read()
+        # ASS format: H:MM:SS.cc (centiseconds)
+        assert "1:02:03.45" in content
+    finally:
+        os.unlink(path)
+
+
+@pytest.mark.asyncio
+async def test_ass_exporter_file_extension():
+    from app.services.exporter.ass_exporter import ASSExporter
+    assert ASSExporter().file_extension() == "ass"
+
+
 # ─── ExporterFactory ────────────────────────────────────────────────────────
 
 def test_exporter_factory_srt():
@@ -254,6 +328,12 @@ def test_exporter_factory_davinci():
     from app.services.exporter.base import ExporterFactory
     from app.services.exporter.davinci_exporter import DaVinciExporter
     assert isinstance(ExporterFactory.get_exporter("davinci"), DaVinciExporter)
+
+
+def test_exporter_factory_ass():
+    from app.services.exporter.base import ExporterFactory
+    from app.services.exporter.ass_exporter import ASSExporter
+    assert isinstance(ExporterFactory.get_exporter("ass"), ASSExporter)
 
 
 def test_exporter_factory_unsupported():

@@ -586,7 +586,7 @@ async def update_entry(file_id: str, entry_index: int, translated_text: str):
 @router.get("/export/{file_id}")
 async def export_file(
     file_id: str,
-    format: str = Query("srt", regex="^(srt|xlsx|excel|vtt|premiere|davinci)$"),
+    format: str = Query("srt", regex="^(srt|xlsx|excel|vtt|premiere|davinci|ass)$"),
     target_lang: str = Query("vi"),
 ):
     """Export translated file in desired format."""

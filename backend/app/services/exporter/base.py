@@ -35,5 +35,8 @@ class ExporterFactory:
         elif format == "davinci":
             from .davinci_exporter import DaVinciExporter
             return DaVinciExporter()
+        elif format == "ass":
+            from .ass_exporter import ASSExporter
+            return ASSExporter()
         else:
             raise ValueError(f"Unsupported export format: {format}")

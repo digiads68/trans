@@ -43,6 +43,14 @@ const EXPORT_FORMATS = [
     icon: Tv,
     color: 'pink',
   },
+  {
+    id: 'ass',
+    label: 'File ASS',
+    ext: 'ass',
+    description: 'Advanced SubStation Alpha — anime, karaoke',
+    icon: FileText,
+    color: 'teal',
+  },
 ];
 
 const colorMap = {
@@ -51,6 +59,7 @@ const colorMap = {
   purple: 'hover:border-purple-500 hover:bg-purple-50 group-hover:text-purple-600',
   orange: 'hover:border-orange-500 hover:bg-orange-50 group-hover:text-orange-600',
   pink:   'hover:border-pink-500 hover:bg-pink-50 group-hover:text-pink-600',
+  teal:   'hover:border-teal-500 hover:bg-teal-50 group-hover:text-teal-600',
 };
 
 export default function ExportPanel({ fileId, filename, targetLang = 'vi' }) {
