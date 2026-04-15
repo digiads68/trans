@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Settings, Play, ArrowLeft, Sparkles, Globe, Combine, BookOpen } from 'lucide-react';
+import { Settings, Play, ArrowLeft, Sparkles, Globe, Combine, BookOpen, AlertTriangle } from 'lucide-react';
 import { useTranslation } from '../hooks/useTranslation';
 
 const LANG_NAMES = {
@@ -27,8 +27,12 @@ const MODE_INFO = {
 };
 
 export default function TranslationConfig({
-  fileData, models, onTranslationStart, onTranslationComplete, onProgress, onBack,
+  fileData, models, apiConfig, onOpenSettings,
+  onTranslationStart, onTranslationComplete, onProgress, onBack,
 }) {
+  // Provider availability based on runtime API config
+  const apiKeySet = apiConfig?.cliproxy_api_key_set ?? true; // optimistic when config not yet loaded
+  const googleEnabled = apiConfig?.google_translate_enabled ?? true;
   const [provider, setProvider] = useState('llm');
   const [llmModel, setLlmModel] = useState('gpt-4o-mini');
   const [mode, setMode] = useState('standard');
@@ -293,11 +297,48 @@ export default function TranslationConfig({
         </div>
       )}
 
+      {/* Provider availability warning */}
+      {(() => {
+        const needsKey = (provider === 'llm' || provider === 'hybrid') && !apiKeySet;
+        const needsGoogle = provider === 'google' && !googleEnabled;
+        if (!needsKey && !needsGoogle) return null;
+        return (
+          <div className="bg-amber-50 border border-amber-300 rounded-lg p-4 text-sm flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="font-medium text-amber-900">
+                {needsKey
+                  ? 'Chưa cấu hình API key cho LLM'
+                  : 'Google Translate đang bị tắt'}
+              </p>
+              <p className="text-amber-800 mt-0.5">
+                {needsKey
+                  ? 'Bạn cần thêm CLIPROXY_API_KEY trong Cài đặt để dùng AI/Hybrid, hoặc chuyển sang Google Translate.'
+                  : 'Vào Cài đặt để bật Google Translate.'}
+              </p>
+              {onOpenSettings && (
+                <button
+                  type="button"
+                  onClick={onOpenSettings}
+                  className="text-amber-900 underline hover:no-underline mt-1 font-medium"
+                >
+                  Mở Cài đặt ngay
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Start button */}
       <div className="flex justify-center">
         <button
           onClick={handleTranslate}
-          disabled={isTranslating}
+          disabled={
+            isTranslating ||
+            ((provider === 'llm' || provider === 'hybrid') && !apiKeySet) ||
+            (provider === 'google' && !googleEnabled)
+          }
           className="btn-primary text-lg px-8 py-3 flex items-center gap-2"
         >
           <Play className="w-5 h-5" />

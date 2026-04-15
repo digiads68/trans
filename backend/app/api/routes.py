@@ -26,9 +26,35 @@ from app.models.schemas import (
 from app.services.parser import ParserFactory
 from app.services.translator import TranslatorFactory
 from app.services.exporter import ExporterFactory
+from app.services import runtime_config
 from app.utils.language_detect import detect_language_from_entries
 from app.services.cache import get_cache_stats
 from app.api.websocket import manager
+
+
+def _resolve_translator_creds() -> tuple[str, str]:
+    """Get effective (api_base, api_key) from runtime config (falls back to env)."""
+    return runtime_config.get_api_base(), runtime_config.get_api_key()
+
+
+def _validate_provider_or_raise(provider: TranslationProvider) -> None:
+    """Validate that the requested provider is configured. Raises HTTPException(400) if not."""
+    api_key = runtime_config.get_api_key()
+    if provider == TranslationProvider.LLM and not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Chưa cấu hình API key cho LLM. Vào Cài đặt (icon ⚙️) để cấu hình hoặc chuyển sang Google Translate.",
+        )
+    if provider == TranslationProvider.GOOGLE and not runtime_config.get_google_enabled():
+        raise HTTPException(
+            status_code=400,
+            detail="Google Translate đã bị tắt. Vào Cài đặt (icon ⚙️) để bật.",
+        )
+    if provider == TranslationProvider.HYBRID and not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Hybrid mode cần API key cho LLM refine. Cấu hình trong Cài đặt (icon ⚙️).",
+        )
 
 # Lazy import to avoid circular dependency with main.py
 def _get_plugin_manager():
@@ -107,6 +133,56 @@ async def cache_stats():
     """Get translation memory cache statistics."""
     stats = await get_cache_stats()
     return stats
+
+
+# ---------------------------------------------------------------------------
+# Runtime API key configuration
+# ---------------------------------------------------------------------------
+
+class ConfigUpdateRequest(BaseModel):
+    cliproxy_api_base: str | None = None
+    cliproxy_api_key: str | None = None
+    google_translate_enabled: bool | None = None
+
+
+class ConfigTestRequest(BaseModel):
+    api_base: str | None = None
+    api_key: str | None = None
+    model: str = "gpt-4o-mini"
+
+
+@router.get("/config")
+async def get_config():
+    """Return current API configuration. The api_key value is never returned in plaintext."""
+    return runtime_config.get_full_config()
+
+
+@router.post("/config")
+async def update_config(body: ConfigUpdateRequest):
+    """Update runtime API configuration. Pass empty string to clear an override and fall back to .env."""
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    return runtime_config.update_config(updates)
+
+
+@router.post("/config/test")
+async def test_config(body: ConfigTestRequest):
+    """Test API key by making a small LLM call. Uses provided values or falls back to runtime config."""
+    from openai import AsyncOpenAI
+    base = body.api_base or runtime_config.get_api_base()
+    key = body.api_key or runtime_config.get_api_key()
+    if not key:
+        raise HTTPException(status_code=400, detail="API key is empty")
+    try:
+        client = AsyncOpenAI(base_url=base, api_key=key, timeout=15.0)
+        resp = await client.chat.completions.create(
+            model=body.model,
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=5,
+        )
+        content = resp.choices[0].message.content or ""
+        return {"ok": True, "model": body.model, "response": content[:80]}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"API test failed: {str(e)[:200]}")
 
 
 @router.post("/upload", response_model=UploadResponse)
@@ -309,13 +385,17 @@ async def translate_file(request: TranslationRequest):
     entries = file_data["entries"]
     source_lang = request.source_lang or file_data.get("detected_lang", "auto")
 
+    # Validate provider configuration
+    _validate_provider_or_raise(request.provider)
+    api_base, api_key = _resolve_translator_creds()
+
     # Create translator
     try:
         translator = TranslatorFactory.create(
             provider=request.provider,
             model=request.llm_model,
-            api_base=settings.CLIPROXY_API_BASE,
-            api_key=settings.CLIPROXY_API_KEY,
+            api_base=api_base,
+            api_key=api_key,
             hybrid_primary=request.hybrid_primary,
             hybrid_fallback=request.hybrid_fallback,
             hybrid_refine=request.hybrid_refine,
@@ -438,6 +518,10 @@ async def translate_files_batch(request: BatchTranslationRequest):
     if missing:
         raise HTTPException(status_code=404, detail=f"Files not found: {missing}")
 
+    # Validate provider configuration once for the whole batch
+    _validate_provider_or_raise(request.provider)
+    api_base, api_key = _resolve_translator_creds()
+
     async def _translate_one(file_id: str) -> dict:
         file_data = file_store[file_id]
         entries = file_data["entries"]
@@ -446,8 +530,8 @@ async def translate_files_batch(request: BatchTranslationRequest):
         translator = TranslatorFactory.create(
             provider=request.provider,
             model=request.llm_model,
-            api_base=settings.CLIPROXY_API_BASE,
-            api_key=settings.CLIPROXY_API_KEY,
+            api_base=api_base,
+            api_key=api_key,
             hybrid_primary=request.hybrid_primary,
             hybrid_fallback=request.hybrid_fallback,
             hybrid_refine=request.hybrid_refine,
@@ -555,10 +639,13 @@ async def translate_single_entry(
 
     source_lang = file_store[file_id].get("detected_lang", "auto")
 
+    _validate_provider_or_raise(provider)
+    api_base, api_key = _resolve_translator_creds()
+
     translator = TranslatorFactory.create(
         provider=provider, model=llm_model,
-        api_base=settings.CLIPROXY_API_BASE,
-        api_key=settings.CLIPROXY_API_KEY,
+        api_base=api_base,
+        api_key=api_key,
     )
 
     entry.translated_text = await translator.translate_text(

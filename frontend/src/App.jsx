@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { getModels } from './services/api';
+import React, { useState, useEffect, useCallback } from 'react';
+import { getModels, getConfig } from './services/api';
 import Header from './components/Header';
 import FileUpload from './components/FileUpload';
 import TranslationConfig from './components/TranslationConfig';
@@ -7,6 +7,7 @@ import TranslationProgress from './components/TranslationProgress';
 import SubtitlePreview from './components/SubtitlePreview';
 import ExportPanel from './components/ExportPanel';
 import BatchManager from './components/BatchManager';
+import SettingsModal from './components/SettingsModal';
 
 export default function App() {
   const [step, setStep] = useState('upload'); // upload, config, translating, preview, batch
@@ -16,12 +17,25 @@ export default function App() {
   const [modelsError, setModelsError] = useState(null);
   const [translationResult, setTranslationResult] = useState(null);
   const [translationProgress, setTranslationProgress] = useState(null);
+  const [apiConfig, setApiConfig] = useState(null);
+  const [showSettings, setShowSettings] = useState(false);
   // Track user's translation config for retranslation
   const [translationConfig, setTranslationConfig] = useState({
     provider: 'llm',
     llmModel: 'gpt-4o-mini',
     targetLang: 'vi',
   });
+
+  const refreshApiConfig = useCallback(async () => {
+    try {
+      const cfg = await getConfig();
+      setApiConfig(cfg);
+      return cfg;
+    } catch (err) {
+      console.error('Failed to fetch config:', err);
+      return null;
+    }
+  }, []);
 
   useEffect(() => {
     getModels()
@@ -30,7 +44,8 @@ export default function App() {
         console.error('Failed to fetch models:', err);
         setModelsError('Không thể tải danh sách models. Kiểm tra kết nối backend.');
       });
-  }, []);
+    refreshApiConfig();
+  }, [refreshApiConfig]);
 
   const handleFileUploaded = (data) => {
     setFileData(data);
@@ -119,7 +134,18 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
-      <Header onReset={handleReset} />
+      <Header
+        onReset={handleReset}
+        onOpenSettings={() => setShowSettings(true)}
+        apiConfigured={apiConfig?.cliproxy_api_key_set ?? null}
+      />
+
+      {showSettings && (
+        <SettingsModal
+          onClose={() => setShowSettings(false)}
+          onSaved={() => refreshApiConfig()}
+        />
+      )}
 
       <main className="max-w-6xl mx-auto px-4 py-8">
         {/* Step indicators */}
@@ -176,6 +202,8 @@ export default function App() {
           <TranslationConfig
             fileData={fileData}
             models={models}
+            apiConfig={apiConfig}
+            onOpenSettings={() => setShowSettings(true)}
             onTranslationStart={handleTranslationStart}
             onTranslationComplete={handleTranslationComplete}
             onProgress={handleTranslationProgress}

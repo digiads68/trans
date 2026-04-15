@@ -20,6 +20,11 @@ outputs/*
 !uploads/.gitkeep
 !outputs/.gitkeep
 
+# Runtime config (contains API keys, persisted across restarts)
+data/*
+backend/data/
+!data/.gitkeep
+
 # IDE
 .vscode/
 .idea/

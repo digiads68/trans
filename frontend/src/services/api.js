@@ -34,6 +34,21 @@ export const getModels = async () => {
   return response.data;
 };
 
+export const getConfig = async () => {
+  const response = await api.get('/config');
+  return response.data;
+};
+
+export const updateConfig = async (updates) => {
+  const response = await api.post('/config', updates);
+  return response.data;
+};
+
+export const testConfig = async (payload) => {
+  const response = await api.post('/config/test', payload);
+  return response.data;
+};
+
 export const getFileEntries = async (fileId, page = 1, pageSize = 50) => {
   const response = await api.get(`/file/${fileId}/entries`, {
     params: { page, page_size: pageSize },
