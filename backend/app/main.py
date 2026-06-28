@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,23 +17,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(
-    title=settings.APP_NAME,
-    version=settings.APP_VERSION,
-    description="Subtitle Translation System - Translate subtitles from any language to Vietnamese",
-)
-
-# CORS - use configured origins, no wildcard with credentials
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# API routes
-app.include_router(router, prefix="/api")
+# Plugin manager (singleton accessible to routes)
+plugin_manager = PluginManager(plugins_dir=settings.PLUGINS_DIR)
 
 
 async def cleanup_expired_files():
@@ -47,7 +33,6 @@ async def cleanup_expired_files():
         for fid in expired:
             data = file_store.pop(fid, None)
             if data:
-                # Clean up uploaded file
                 upload_path = data.get("upload_path")
                 if upload_path and os.path.exists(upload_path):
                     try:
@@ -59,26 +44,40 @@ async def cleanup_expired_files():
             logger.info(f"Cleanup: removed {len(expired)} expired files")
 
 
-# Plugin manager (singleton accessible to routes)
-plugin_manager = PluginManager(plugins_dir=settings.PLUGINS_DIR)
-
-
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
     asyncio.create_task(cleanup_expired_files())
-
-    # Discover and load plugins
     count = plugin_manager.discover()
     if count:
         logger.info(f"Loaded {count} plugin(s)")
     await plugin_manager.emit_startup()
-
     logger.info(f"{settings.APP_NAME} v{settings.APP_VERSION} started")
 
+    yield
 
-@app.on_event("shutdown")
-async def shutdown_event():
+    # Shutdown
     await plugin_manager.emit_shutdown()
+
+
+app = FastAPI(
+    title=settings.APP_NAME,
+    version=settings.APP_VERSION,
+    description="Subtitle Translation System - Translate subtitles from any language to Vietnamese",
+    lifespan=lifespan,
+)
+
+# CORS - use configured origins, no wildcard with credentials
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# API routes
+app.include_router(router, prefix="/api")
 
 
 @app.get("/")
