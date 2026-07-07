@@ -12,6 +12,7 @@ Extended integration tests covering:
 
 import asyncio
 import os
+import time
 import pytest
 from unittest.mock import AsyncMock, patch
 
@@ -51,7 +52,10 @@ def app():
 
 @pytest.fixture(scope="module")
 def client(app):
-    return TestClient(app)
+    # Context manager keeps ONE event loop across requests so background
+    # translation tasks persist between the POST and the status polls.
+    with TestClient(app) as c:
+        yield c
 
 
 @pytest.fixture(autouse=True)
@@ -66,9 +70,21 @@ def reset_runtime_config(tmp_path, monkeypatch):
 
 
 def _make_mock_translator(entries, provider_name="llm"):
+    """Mock translator whose translate_batch fills in translations when called.
+
+    The job runner clears translated_text at job start, so pre-setting texts
+    on the entries doesn't work — the mock must set them during the call.
+    """
     mock = AsyncMock()
     mock.provider_name = provider_name
-    mock.translate_batch.return_value = entries
+
+    async def fake_translate_batch(*args, **kwargs):
+        batch = kwargs.get("entries") or (args[0] if args else entries)
+        for i, e in enumerate(batch):
+            e.translated_text = f"Bản dịch {i + 1}"
+        return batch
+
+    mock.translate_batch.side_effect = fake_translate_batch
     mock.translate_text.return_value = "Xin chào"
     return mock
 
@@ -77,6 +93,40 @@ def _upload(client, content=SRT_2, filename="t.srt"):
     resp = client.post("/api/upload", files={"file": (filename, content, "text/plain")})
     assert resp.status_code == 200, resp.text
     return resp.json()["file_id"]
+
+
+def _wait_job(client, file_id, timeout=10.0):
+    """Poll the job status endpoint until the job reaches a terminal state."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        resp = client.get(f"/api/translate/{file_id}/status")
+        if resp.status_code == 200:
+            data = resp.json()
+            if data["status"] in ("completed", "error", "cancelled"):
+                return data
+        time.sleep(0.05)
+    raise TimeoutError(f"Job for {file_id} did not finish within {timeout}s")
+
+
+def _run_job(client, fid, provider="llm", mock_translator=None, extra=None):
+    """Start a translation job with a mocked translator and wait for it."""
+    from app.api.routes import file_store
+    entries = file_store[fid]["entries"]
+    translator = mock_translator or _make_mock_translator(entries, provider)
+
+    with patch("app.api.routes.TranslatorFactory.create") as mock_create:
+        mock_create.return_value = translator
+        body = {
+            "file_id": fid, "provider": provider, "llm_model": "gpt-4o-mini",
+            "mode": "standard", "target_lang": "vi",
+        }
+        if extra:
+            body.update(extra)
+        resp = client.post("/api/translate", json=body)
+    if resp.status_code != 200:
+        return resp, None
+    status = _wait_job(client, fid)
+    return resp, status
 
 
 # ── /api/config ───────────────────────────────────────────────────────────────
@@ -200,45 +250,31 @@ class TestProviderValidation:
         runtime_config.update_config({"google_translate_enabled": True})
         fid = _upload(client)
 
-        from app.api.routes import file_store
-        entries = file_store[fid]["entries"]
-        for e in entries:
-            e.translated_text = "Dịch"
-
-        with patch("app.api.routes.TranslatorFactory.create") as mock_create:
-            mock_create.return_value = _make_mock_translator(entries, "google")
-            resp = client.post("/api/translate", json={
-                "file_id": fid, "provider": "google",
-                "mode": "standard", "target_lang": "vi",
-            })
+        resp, status = _run_job(client, fid, provider="google")
         assert resp.status_code == 200
+        assert status["status"] == "completed"
 
 
 # ── Translation flow ──────────────────────────────────────────────────────────
 
 class TestTranslationFlow:
-    def _translate(self, client, fid, provider="llm"):
-        from app.api.routes import file_store
-        entries = file_store[fid]["entries"]
-        for i, e in enumerate(entries):
-            e.translated_text = f"Bản dịch {i + 1}"
-
-        with patch("app.api.routes.TranslatorFactory.create") as mock_create:
-            mock_create.return_value = _make_mock_translator(entries, provider)
-            resp = client.post("/api/translate", json={
-                "file_id": fid, "provider": provider, "llm_model": "gpt-4o-mini",
-                "mode": "standard", "target_lang": "vi",
-            })
-        return resp
-
-    def test_translate_returns_entries(self, client):
+    def test_translate_starts_job_and_completes(self, client):
         fid = _upload(client)
-        resp = self._translate(client, fid)
+        resp, status = _run_job(client, fid)
         assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "completed"
-        assert len(data["entries"]) == 2
-        assert data["entries"][0]["translated_text"] == "Bản dịch 1"
+        assert resp.json()["status"] == "started"
+        assert status["status"] == "completed"
+        assert status["completed"] == status["total"] == 2
+        assert status["failed"] == 0
+
+    def test_translate_result_in_store(self, client):
+        fid = _upload(client)
+        _run_job(client, fid)
+        entries_resp = client.get(f"/api/file/{fid}/entries")
+        assert entries_resp.status_code == 200
+        entries = entries_resp.json()["entries"]
+        assert all(e["translated_text"] for e in entries)
+        assert entries[0]["translated_text"] == "Bản dịch 1"
 
     def test_translate_nonexistent_file_returns_404(self, client):
         resp = client.post("/api/translate", json={
@@ -247,19 +283,41 @@ class TestTranslationFlow:
         })
         assert resp.status_code == 404
 
+    def test_status_without_job_returns_404(self, client):
+        fid = _upload(client)
+        resp = client.get(f"/api/translate/{fid}/status")
+        assert resp.status_code == 404
+
+    def test_cancel_without_job_returns_404(self, client):
+        fid = _upload(client)
+        resp = client.post(f"/api/translate/{fid}/cancel")
+        assert resp.status_code == 404
+
     def test_translate_all_modes(self, client):
         for mode in ["standard", "context", "glossary"]:
             fid = _upload(client)
-            resp = self._translate(client, fid)
+            resp, status = _run_job(client, fid, extra={"mode": mode})
             assert resp.status_code == 200, f"mode={mode} failed"
+            assert status["status"] == "completed", f"mode={mode}: {status}"
 
-    def test_translate_updates_store(self, client):
+    def test_failed_lines_are_counted(self, client):
+        """Entries left untranslated by the translator are reported as failed."""
         fid = _upload(client)
-        self._translate(client, fid)
-        entries_resp = client.get(f"/api/file/{fid}/entries")
-        assert entries_resp.status_code == 200
-        entries = entries_resp.json()["entries"]
-        assert all(e["translated_text"] for e in entries)
+        from app.api.routes import file_store
+        entries = file_store[fid]["entries"]
+
+        mock = AsyncMock()
+        mock.provider_name = "llm"
+
+        async def partial_translate(*args, **kwargs):
+            batch = kwargs.get("entries")
+            batch[0].translated_text = "Chỉ dịch dòng đầu"
+            return batch  # second entry stays None
+
+        mock.translate_batch.side_effect = partial_translate
+        _, status = _run_job(client, fid, mock_translator=mock)
+        assert status["status"] == "completed"
+        assert status["failed"] == 1
 
     def test_manual_update_entry(self, client):
         fid = _upload(client)
@@ -269,8 +327,7 @@ class TestTranslationFlow:
 
     def test_retranslate_single_entry(self, client):
         fid = _upload(client)
-        # Pre-translate so entry exists
-        self._translate(client, fid)
+        _run_job(client, fid)
 
         from app.api.routes import file_store
         entries = file_store[fid]["entries"]
@@ -298,18 +355,9 @@ class TestTranslationFlow:
 class TestExportFormats:
     def _setup_translated_file(self, client):
         fid = _upload(client)
-        from app.api.routes import file_store
-        entries = file_store[fid]["entries"]
-        for i, e in enumerate(entries):
-            e.translated_text = f"Dòng dịch {i + 1}"
-
-        with patch("app.api.routes.TranslatorFactory.create") as mock_create:
-            mock_create.return_value = _make_mock_translator(entries)
-            resp = client.post("/api/translate", json={
-                "file_id": fid, "provider": "llm", "llm_model": "gpt-4o-mini",
-                "mode": "standard", "target_lang": "vi",
-            })
+        resp, status = _run_job(client, fid)
         assert resp.status_code == 200
+        assert status["status"] == "completed"
         return fid
 
     @pytest.mark.parametrize("fmt,min_bytes", [

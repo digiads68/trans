@@ -222,3 +222,48 @@ def test_parser_factory_unsupported():
     from app.services.parser.base import ParserFactory
     with pytest.raises(ValueError, match="Unsupported"):
         ParserFactory.get_parser("subtitle.mkv")
+
+
+# ─── Excel parser robustness ─────────────────────────────────────────────────
+
+def _make_xlsx(rows):
+    import io
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for row in rows:
+        ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+async def test_excel_contains_match_headers():
+    """Headers like 'Original Text' / 'Start Time (s)' are recognized."""
+    from app.services.parser.excel_parser import ExcelParser
+    content = _make_xlsx([
+        ["No.", "Start Time", "End Time", "Original Text"],
+        [1, "00:00:01,000", "00:00:03,000", "Hello"],
+        [2, "00:00:04,000", "00:00:06,000", "World"],
+    ])
+    entries = await ExcelParser().parse(content, "t.xlsx")
+    assert len(entries) == 2
+    assert entries[0].original_text == "Hello"
+    assert entries[0].start_time == "00:00:01,000"
+    # Header row was NOT parsed as a subtitle line
+    assert all("Original" not in e.original_text for e in entries)
+
+
+async def test_excel_duplicate_indices_reindexed():
+    """Duplicate index values in the sheet must not collapse entries."""
+    from app.services.parser.excel_parser import ExcelParser
+    content = _make_xlsx([
+        ["index", "text"],
+        [1, "Line A"],
+        [1, "Line B"],
+        [2, "Line C"],
+    ])
+    entries = await ExcelParser().parse(content, "t.xlsx")
+    assert len(entries) == 3
+    indices = [e.index for e in entries]
+    assert len(set(indices)) == 3, f"Indices not unique: {indices}"

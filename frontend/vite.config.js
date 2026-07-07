@@ -6,12 +6,10 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      // ws: true lets the /api/ws/* WebSocket upgrade through in dev mode
       '/api': {
         target: 'http://localhost:8000',
         changeOrigin: true,
-      },
-      '/ws': {
-        target: 'ws://localhost:8000',
         ws: true,
       },
     },

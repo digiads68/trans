@@ -5,6 +5,25 @@ from app.models.schemas import SubtitleEntry, TranslationProvider, TranslationMo
 # Progress callback: (completed, total, current_text) -> None or Awaitable[None]
 ProgressCallback = Optional[Callable[[int, int, str], Union[None, Awaitable[None]]]]
 
+# Cancellation check: returns True when the job should stop
+CancelCheck = Optional[Callable[[], bool]]
+
+
+class TranslationCancelled(Exception):
+    """Raised by translators when a cancellation is requested mid-batch."""
+
+
+class TranslationFailed(Exception):
+    """Raised when translation cannot proceed (auth error, unreachable API, ...).
+
+    `user_message` carries a clean, user-facing (Vietnamese) explanation.
+    """
+
+    def __init__(self, user_message: str, original: Optional[Exception] = None):
+        super().__init__(user_message)
+        self.user_message = user_message
+        self.original = original
+
 
 class BaseTranslator(ABC):
     """Base class for all translation providers."""
@@ -19,8 +38,14 @@ class BaseTranslator(ABC):
         on_progress: ProgressCallback = None,
         custom_prompt: Optional[str] = None,
         glossary: Optional[dict[str, str]] = None,
+        should_cancel: CancelCheck = None,
     ) -> list[SubtitleEntry]:
-        """Translate a batch of subtitle entries."""
+        """Translate a batch of subtitle entries.
+
+        Entries that could not be translated keep translated_text=None so the
+        caller can count failures. Raises TranslationCancelled when
+        should_cancel() returns True, and TranslationFailed on permanent errors.
+        """
         pass
 
     @abstractmethod
@@ -59,14 +84,27 @@ class TranslatorFactory:
             return GoogleTranslator()
         elif provider == TranslationProvider.HYBRID:
             from .hybrid_translator import HybridTranslator
+            primary_provider = hybrid_primary or TranslationProvider.GOOGLE
+            fallback_provider = hybrid_fallback or TranslationProvider.LLM
+
+            # Refine only works with an LLM refiner. If the user enabled refine
+            # but picked providers in the "wrong" order (LLM primary + Google
+            # fallback), swap so the refiner is always the LLM — otherwise the
+            # refine step would be silently skipped.
+            if hybrid_refine and fallback_provider != TranslationProvider.LLM:
+                if primary_provider == TranslationProvider.LLM:
+                    primary_provider, fallback_provider = fallback_provider, primary_provider
+                else:
+                    fallback_provider = TranslationProvider.LLM
+
             primary = TranslatorFactory.create(
-                hybrid_primary or TranslationProvider.GOOGLE,
+                primary_provider,
                 model=model,
                 api_base=api_base,
                 api_key=api_key,
             )
             fallback = TranslatorFactory.create(
-                hybrid_fallback or TranslationProvider.LLM,
+                fallback_provider,
                 model=model,
                 api_base=api_base,
                 api_key=api_key,

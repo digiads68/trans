@@ -92,6 +92,7 @@ class UploadResponse(BaseModel):
     entries: list[SubtitleEntry] = []
     detected_lang: Optional[str] = None
     total_entries: int = 0
+    error: Optional[str] = None  # set when the file was rejected in a batch upload
 
 
 class BatchUploadResponse(BaseModel):

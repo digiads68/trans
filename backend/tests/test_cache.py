@@ -88,3 +88,24 @@ async def test_cache_hit_count_increments():
     row = conn.execute("SELECT hit_count FROM translation_cache").fetchone()
     conn.close()
     assert row[0] >= 2
+
+
+# ─── Context namespacing (provider/model/mode isolation) ────────────────────
+
+async def test_cache_context_isolation():
+    """Different contexts (provider/model/glossary) must not share slots."""
+    from app.services.cache import get_cached, set_cached
+
+    await set_cached("en", "vi", "Hello ctx test", "Bản dịch Google", context="google")
+    await set_cached("en", "vi", "Hello ctx test", "Bản dịch LLM", context="llm|gpt-4o|standard|abc")
+
+    assert await get_cached("en", "vi", "Hello ctx test", context="google") == "Bản dịch Google"
+    assert await get_cached("en", "vi", "Hello ctx test", context="llm|gpt-4o|standard|abc") == "Bản dịch LLM"
+    # A third context sees nothing
+    assert await get_cached("en", "vi", "Hello ctx test", context="llm|claude|standard|xyz") is None
+
+
+async def test_cache_default_context_backward_compatible():
+    from app.services.cache import get_cached, set_cached
+    await set_cached("en", "vi", "No context line", "Không ngữ cảnh")
+    assert await get_cached("en", "vi", "No context line") == "Không ngữ cảnh"

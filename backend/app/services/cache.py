@@ -1,7 +1,13 @@
 """
 Translation memory cache using SQLite.
 Caches previously translated phrases to reduce API calls and improve speed.
-Cache key: (source_lang, target_lang, source_text) → translated_text
+Cache key: (context, source_lang, target_lang, source_text) → translated_text
+
+`context` namespaces entries by provider/model/mode/glossary so a Google
+translation is never returned for an LLM request (and vice versa), and
+glossary-influenced results don't leak into plain requests.
+
+The DB lives in backend/data/ so translation memory persists across restarts.
 """
 
 import asyncio
@@ -14,7 +20,14 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH = os.environ.get("CACHE_DB_PATH", "/tmp/translation_cache.db")
+_DEFAULT_DB_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    "data",
+    "translation_cache.db",
+)
+_DB_PATH = os.environ.get("CACHE_DB_PATH", _DEFAULT_DB_PATH)
+if os.path.dirname(_DB_PATH):
+    os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
 _lock = asyncio.Lock()
 
 # Maximum number of cache entries to prevent unbounded growth
@@ -50,8 +63,8 @@ def _init_db():
         conn.commit()
 
 
-def _make_key(source_lang: str, target_lang: str, source_text: str) -> str:
-    raw = f"{source_lang}|{target_lang}|{source_text}"
+def _make_key(source_lang: str, target_lang: str, source_text: str, context: str = "") -> str:
+    raw = f"{context}|{source_lang}|{target_lang}|{source_text}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -62,12 +75,14 @@ except Exception as e:
     logger.warning(f"Translation cache init failed: {e}")
 
 
-async def get_cached(source_lang: str, target_lang: str, source_text: str) -> Optional[str]:
+async def get_cached(
+    source_lang: str, target_lang: str, source_text: str, context: str = ""
+) -> Optional[str]:
     """Look up a translation in the cache. Returns None on miss."""
     if not source_text.strip():
         return None
 
-    key = _make_key(source_lang, target_lang, source_text)
+    key = _make_key(source_lang, target_lang, source_text, context)
     try:
         async with _lock:
             result = await asyncio.to_thread(_get_cached_sync, key)
@@ -104,6 +119,7 @@ async def set_cached(
     target_lang: str,
     source_text: str,
     translated_text: str,
+    context: str = "",
 ) -> None:
     """Store a translation in the cache."""
     if not source_text.strip() or not translated_text.strip():
@@ -112,7 +128,7 @@ async def set_cached(
     if source_text.strip() == translated_text.strip():
         return
 
-    key = _make_key(source_lang, target_lang, source_text)
+    key = _make_key(source_lang, target_lang, source_text, context)
     try:
         async with _lock:
             await asyncio.to_thread(

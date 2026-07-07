@@ -25,8 +25,10 @@ from app.models.schemas import (
 )
 from app.services.parser import ParserFactory
 from app.services.translator import TranslatorFactory
+from app.services.translator.base import TranslationCancelled, TranslationFailed
 from app.services.exporter import ExporterFactory
 from app.services import runtime_config
+from app.services import jobs
 from app.utils.language_detect import detect_language_from_entries
 from app.services.cache import get_cache_stats
 from app.api.websocket import manager
@@ -286,6 +288,7 @@ async def upload_files_batch(files: list[UploadFile] = File(...)):
                 total_entries=0,
                 detected_lang=None,
                 entries=[],
+                error=f"Định dạng .{ext} không được hỗ trợ",
             ))
             continue
 
@@ -293,7 +296,13 @@ async def upload_files_batch(files: list[UploadFile] = File(...)):
         content = await file.read()
 
         if len(content) > settings.MAX_UPLOAD_SIZE:
-            continue  # Skip oversized files silently in batch
+            max_mb = settings.MAX_UPLOAD_SIZE // 1_000_000
+            results.append(UploadResponse(
+                file_id="", filename=file.filename, file_type=FileType.SRT,
+                total_entries=0, entries=[],
+                error=f"File vượt quá giới hạn {max_mb}MB",
+            ))
+            continue
 
         upload_path = os.path.join(settings.UPLOAD_DIR, f"{file_id}_{file.filename}")
         with open(upload_path, "wb") as f:
@@ -302,7 +311,12 @@ async def upload_files_batch(files: list[UploadFile] = File(...)):
         try:
             parser = ParserFactory.get_parser(file.filename)
             entries = await parser.parse(content, file.filename)
-        except Exception:
+        except Exception as e:
+            results.append(UploadResponse(
+                file_id="", filename=file.filename, file_type=FileType.SRT,
+                total_entries=0, entries=[],
+                error=f"Không đọc được file: {str(e)[:100]}",
+            ))
             continue
 
         detected_lang = detect_language_from_entries([e.original_text for e in entries])
@@ -375,48 +389,22 @@ async def get_file_entries(
     }
 
 
-@router.post("/translate", response_model=TranslationResponse)
-async def translate_file(request: TranslationRequest):
-    """Start translation of an uploaded file."""
-    if request.file_id not in file_store:
-        raise HTTPException(status_code=404, detail="File not found. Please upload first.")
+async def _run_translation_job(
+    job: "jobs.TranslationJob",
+    request: TranslationRequest,
+    translator,
+    source_lang: str,
+):
+    """Background task that runs one translation job to completion."""
+    file_data = file_store.get(request.file_id)
+    if file_data is None:
+        job.status = "error"
+        job.error = "File đã hết hạn trong bộ nhớ. Upload lại file."
+        job.finished_at = time.time()
+        return
 
-    file_data = file_store[request.file_id]
     entries = file_data["entries"]
-    source_lang = request.source_lang or file_data.get("detected_lang", "auto")
-
-    # Validate provider configuration
-    _validate_provider_or_raise(request.provider)
-    api_base, api_key = _resolve_translator_creds()
-
-    # Create translator
-    try:
-        translator = TranslatorFactory.create(
-            provider=request.provider,
-            model=request.llm_model,
-            api_base=api_base,
-            api_key=api_key,
-            hybrid_primary=request.hybrid_primary,
-            hybrid_fallback=request.hybrid_fallback,
-            hybrid_refine=request.hybrid_refine,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to create translator: {str(e)}")
-
-    # Progress callback that sends WebSocket updates
-    async def on_progress(completed: int, total: int, current_text: str):
-        await manager.send_progress(request.file_id, {
-            "type": "progress",
-            "file_id": request.file_id,
-            "completed": completed,
-            "total": total,
-            "current_text": current_text,
-            "status": "processing",
-        })
-
-    # Translate
-    import time as _time
-    _start_ts = _time.time()
+    total = len(entries)
     pm = _get_plugin_manager()
     translation_meta = {
         "source_lang": source_lang,
@@ -425,11 +413,31 @@ async def translate_file(request: TranslationRequest):
         "mode": request.mode.value if hasattr(request.mode, "value") else str(request.mode),
     }
 
+    async def on_progress(completed: int, tot: int, current_text: str):
+        job.completed = completed
+        job.current_text = current_text
+        await manager.send_progress(request.file_id, {
+            "type": "progress",
+            "file_id": request.file_id,
+            "completed": completed,
+            "total": tot,
+            "current_text": current_text,
+            "status": "processing",
+        })
+
+    job.status = "processing"
+    start_ts = time.time()
+
     try:
+        # Fresh run: clear previous translations so failed-count is accurate.
+        # Cached lines re-fill instantly, so restarting a cancelled job is cheap.
+        for e in entries:
+            e.translated_text = None
+
         await manager.send_progress(request.file_id, {
             "type": "start",
             "file_id": request.file_id,
-            "total": len(entries),
+            "total": total,
             "provider": translator.provider_name,
             "status": "processing",
         })
@@ -445,52 +453,136 @@ async def translate_file(request: TranslationRequest):
             on_progress=on_progress,
             custom_prompt=request.custom_prompt,
             glossary=request.glossary,
+            should_cancel=job.cancel_event.is_set,
         )
 
-        # Update store
         file_store[request.file_id]["entries"] = translated_entries
+
+        failed = sum(1 for e in translated_entries if not e.translated_text)
+        job.completed = total
+        job.failed = failed
+        job.status = "completed"
+        job.finished_at = time.time()
 
         if pm:
             await pm.emit_translation_complete(
                 request.file_id,
                 translated_entries,
-                {**translation_meta, "duration_seconds": round(_time.time() - _start_ts, 2)},
+                {**translation_meta, "duration_seconds": round(time.time() - start_ts, 2)},
             )
 
         await manager.send_progress(request.file_id, {
             "type": "complete",
             "file_id": request.file_id,
-            "completed": len(entries),
-            "total": len(entries),
+            "completed": total,
+            "total": total,
+            "failed": failed,
             "status": "completed",
         })
 
-        response = TranslationResponse(
-            file_id=request.file_id,
-            original_file=file_data["filename"],
-            entries=translated_entries,
-            source_lang=source_lang,
-            target_lang=request.target_lang,
-            provider=translator.provider_name,
-            model=request.llm_model,
-            status="completed",
-        )
-
-        # Fire webhook if requested (non-blocking)
         if request.webhook_url:
-            asyncio.create_task(_fire_webhook(request.webhook_url, response.model_dump()))
+            asyncio.create_task(_fire_webhook(request.webhook_url, {
+                "file_id": request.file_id,
+                "original_file": file_data["filename"],
+                "status": "completed",
+                "total_entries": total,
+                "failed_entries": failed,
+                **translation_meta,
+            }))
 
-        return response
+    except (TranslationCancelled, asyncio.CancelledError):
+        job.status = "cancelled"
+        job.finished_at = time.time()
+        # Entries translated before the cancel are kept in file_store
+        await manager.send_progress(request.file_id, {
+            "type": "cancelled",
+            "file_id": request.file_id,
+            "completed": job.completed,
+            "total": total,
+            "status": "cancelled",
+        })
+        logger.info(f"Translation cancelled for {request.file_id} at {job.completed}/{total}")
 
     except Exception as e:
-        logger.error(f"Translation failed: {e}")
+        logger.exception(f"Translation job failed for {request.file_id}")
+        job.status = "error"
+        job.error = jobs.classify_error(e)
+        job.finished_at = time.time()
         await manager.send_progress(request.file_id, {
             "type": "error",
             "file_id": request.file_id,
-            "error": str(e),
+            "error": job.error,
             "status": "error",
         })
-        raise HTTPException(status_code=500, detail=f"Translation failed: {str(e)}")
+
+
+@router.post("/translate")
+async def translate_file(request: TranslationRequest):
+    """Start a translation job. Returns immediately; track progress via
+    WebSocket /ws/{file_id} or GET /translate/{file_id}/status."""
+    if request.file_id not in file_store:
+        raise HTTPException(status_code=404, detail="File not found. Please upload first.")
+
+    file_data = file_store[request.file_id]
+    entries = file_data["entries"]
+    source_lang = request.source_lang or file_data.get("detected_lang") or "auto"
+
+    # Validate provider configuration
+    _validate_provider_or_raise(request.provider)
+    api_base, api_key = _resolve_translator_creds()
+
+    try:
+        translator = TranslatorFactory.create(
+            provider=request.provider,
+            model=request.llm_model,
+            api_base=api_base,
+            api_key=api_key,
+            hybrid_primary=request.hybrid_primary,
+            hybrid_fallback=request.hybrid_fallback,
+            hybrid_refine=request.hybrid_refine,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to create translator: {str(e)}")
+
+    try:
+        job = jobs.create_job(
+            request.file_id,
+            total=len(entries),
+            provider=translator.provider_name,
+            target_lang=request.target_lang,
+        )
+    except jobs.JobConflict:
+        raise HTTPException(
+            status_code=409,
+            detail="File này đang được dịch. Đợi hoàn thành hoặc hủy job hiện tại trước.",
+        )
+
+    job.task = asyncio.create_task(_run_translation_job(job, request, translator, source_lang))
+
+    return {
+        "status": "started",
+        "file_id": request.file_id,
+        "total": len(entries),
+        "provider": translator.provider_name,
+    }
+
+
+@router.get("/translate/{file_id}/status")
+async def get_translation_status(file_id: str):
+    """Poll translation job status (fallback when WebSocket is unavailable)."""
+    job = jobs.get_job(file_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No translation job for this file")
+    return job.to_dict()
+
+
+@router.post("/translate/{file_id}/cancel")
+async def cancel_translation(file_id: str):
+    """Cancel a running translation job. Already-translated lines are kept."""
+    job = jobs.request_cancel(file_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Không có job dịch nào đang chạy cho file này")
+    return {"status": "cancelling", "file_id": file_id, "completed": job.completed, "total": job.total}
 
 
 async def _fire_webhook(url: str, payload: dict) -> None:
@@ -648,9 +740,12 @@ async def translate_single_entry(
         api_key=api_key,
     )
 
-    entry.translated_text = await translator.translate_text(
-        entry.original_text, source_lang, target_lang,
-    )
+    try:
+        entry.translated_text = await translator.translate_text(
+            entry.original_text, source_lang, target_lang,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=jobs.classify_error(e))
 
     return entry
 
@@ -714,12 +809,9 @@ async def websocket_endpoint(websocket: WebSocket, file_id: str):
     try:
         while True:
             data = await websocket.receive_text()
-            # Handle client messages if needed (e.g., cancel)
             if data == "cancel":
-                await manager.send_progress(file_id, {
-                    "type": "cancelled",
-                    "file_id": file_id,
-                    "status": "cancelled",
-                })
+                # Real cancellation — the job runner broadcasts the
+                # "cancelled" event once the translator actually stops.
+                jobs.request_cancel(file_id)
     except WebSocketDisconnect:
         manager.disconnect(websocket, file_id)

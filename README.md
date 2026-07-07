@@ -8,9 +8,14 @@
 - **6 format xuất**: SRT, Excel, VTT, ASS, Premiere Pro XML, DaVinci Resolve SRT
 - **3 nguồn dịch**: AI (LLM via cliproxyapi), Google Translate, Hybrid (Google + AI tinh chỉnh)
 - **3 chế độ dịch**: Tiêu chuẩn, Theo ngữ cảnh, Bảng thuật ngữ
-- **Batch processing**: Upload và dịch nhiều file cùng lúc
-- **Translation cache**: SQLite cache giảm API calls cho các cụm từ đã dịch
-- **WebSocket**: Hiển thị tiến trình dịch real-time
+- **Job-based translation**: dịch chạy nền, không giới hạn thời gian, hủy được thật sự (giữ lại phần đã dịch)
+- **Bảng QC chuyên nghiệp**: cảnh báo CPS (ký tự/giây), dòng quá dài, thời lượng hiển thị bất thường, dòng chưa dịch — chuẩn Netflix
+- **Tìm & Thay thế hàng loạt**: đổi tên nhân vật/xưng hô đồng loạt trong bản dịch
+- **Hồ sơ phim**: lưu glossary + bối cảnh phim để dịch phim bộ nhất quán giữa các tập
+- **Batch processing**: Upload nhiều file, nút "Dịch tất cả" với trạng thái từng file
+- **Translation memory**: SQLite cache persist, phân vùng theo provider/model/glossary
+- **WebSocket + polling**: tiến trình real-time kèm ETA, tự fallback khi WS rớt
+- **Retry thông minh**: tự retry lỗi tạm thời (rate limit, timeout) với backoff; lỗi API key báo ngay bằng tiếng Việt
 - **Plugin system**: Mở rộng với hooks lifecycle cho video editor integration
 - **WebHook**: Gửi thông báo khi dịch xong
 - **Dynamic model config**: Thêm/xóa model AI runtime qua API
@@ -122,13 +127,18 @@ trans/
 | POST | `/api/upload` | Upload 1 file phụ đề |
 | POST | `/api/upload/batch` | Upload nhiều file |
 | GET | `/api/file/{id}/entries` | Xem entries (phân trang) |
-| POST | `/api/translate` | Dịch file |
-| POST | `/api/translate/batch` | Dịch nhiều file |
+| POST | `/api/translate` | Bắt đầu **job dịch** (trả về ngay, không chờ) |
+| GET | `/api/translate/{id}/status` | Poll tiến trình job (completed/failed/error) |
+| POST | `/api/translate/{id}/cancel` | Hủy job — giữ lại các dòng đã dịch |
+| POST | `/api/translate/batch` | Dịch nhiều file (đồng bộ, cho API users) |
 | POST | `/api/translate/{id}/entry/{idx}` | Dịch lại 1 dòng |
 | PUT | `/api/file/{id}/entry/{idx}` | Sửa bản dịch thủ công |
 | GET | `/api/export/{id}` | Xuất file (format=srt/xlsx/vtt/ass/premiere/davinci) |
-| GET | `/api/cache/stats` | Thống kê cache |
-| WS | `/api/ws/{id}` | WebSocket tiến trình dịch |
+| GET | `/api/config` | Xem cấu hình API (key được che) |
+| POST | `/api/config` | Cập nhật API key/base runtime |
+| POST | `/api/config/test` | Test API key |
+| GET | `/api/cache/stats` | Thống kê translation memory |
+| WS | `/api/ws/{id}` | WebSocket tiến trình dịch (gửi `cancel` để hủy job) |
 
 ## Cấu hình (.env)
 

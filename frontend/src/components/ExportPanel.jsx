@@ -1,6 +1,6 @@
-import React from 'react';
-import { Download, FileText, FileSpreadsheet, Film, Tv } from 'lucide-react';
-import { exportFile } from '../services/api';
+import React, { useState } from 'react';
+import { Download, FileText, FileSpreadsheet, Film, Tv, Loader2, XCircle } from 'lucide-react';
+import { downloadExport } from '../services/api';
 
 const EXPORT_FORMATS = [
   {
@@ -64,6 +64,20 @@ const colorMap = {
 
 export default function ExportPanel({ fileId, filename, targetLang = 'vi' }) {
   const baseName = filename?.replace(/\.[^.]+$/, '') || 'subtitle';
+  const [downloading, setDownloading] = useState(null);
+  const [error, setError] = useState(null);
+
+  const handleDownload = async (fmt) => {
+    setDownloading(fmt.id);
+    setError(null);
+    try {
+      const outputName = `${baseName}_${targetLang}.${fmt.ext}`;
+      await downloadExport(fileId, fmt.id, targetLang, outputName);
+    } catch (err) {
+      setError(err.message || 'Xuất file thất bại');
+    }
+    setDownloading(null);
+  };
 
   return (
     <div className="card">
@@ -72,27 +86,38 @@ export default function ExportPanel({ fileId, filename, targetLang = 'vi' }) {
         Tải xuống bản dịch
       </h3>
 
+      {error && (
+        <div className="mb-4 bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700 flex items-center gap-2">
+          <XCircle className="w-4 h-4 flex-shrink-0" />
+          {error}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {EXPORT_FORMATS.map((fmt) => {
           const Icon = fmt.icon;
           const hoverClasses = colorMap[fmt.color];
           const outputName = `${baseName}_${targetLang}.${fmt.ext}`;
+          const isDownloading = downloading === fmt.id;
 
           return (
-            <a
+            <button
               key={fmt.id}
-              href={exportFile(fileId, fmt.id, targetLang)}
-              download={outputName}
-              className={`flex items-center gap-3 p-4 rounded-xl border-2 border-gray-200
-                         transition-all group ${hoverClasses}`}
+              type="button"
+              onClick={() => handleDownload(fmt)}
+              disabled={isDownloading}
+              className={`flex items-center gap-3 p-4 rounded-xl border-2 border-gray-200 text-left
+                         transition-all group disabled:opacity-60 ${hoverClasses}`}
             >
-              <Icon className={`w-10 h-10 text-gray-400 flex-shrink-0 ${hoverClasses.split(' ').pop()}`} />
+              {isDownloading
+                ? <Loader2 className="w-10 h-10 text-gray-400 flex-shrink-0 animate-spin" />
+                : <Icon className={`w-10 h-10 text-gray-400 flex-shrink-0 ${hoverClasses.split(' ').pop()}`} />}
               <div className="min-w-0">
                 <p className="font-medium truncate">{fmt.label}</p>
                 <p className="text-sm text-gray-500 truncate">{outputName}</p>
                 <p className="text-xs text-gray-400 mt-0.5">{fmt.description}</p>
               </div>
-            </a>
+            </button>
           );
         })}
       </div>

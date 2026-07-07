@@ -33,12 +33,24 @@ class ExcelParser(BaseParser):
                            "dịch", "bản dịch", "译文", "번역"],
         }
 
+        # Pass 1: exact alias match. Pass 2: contains-match so headers like
+        # "Original Text" or "EN Subtitle" are still recognized.
         for col_idx, cell_value in enumerate(first_row):
             if cell_value is None:
                 continue
             cell_lower = str(cell_value).strip().lower()
             for field, aliases in header_map.items():
-                if cell_lower in aliases:
+                if field not in headers and cell_lower in aliases:
+                    headers[field] = col_idx
+                    break
+        for col_idx, cell_value in enumerate(first_row):
+            if cell_value is None or col_idx in headers.values():
+                continue
+            cell_lower = str(cell_value).strip().lower()
+            for field, aliases in header_map.items():
+                if field in headers:
+                    continue
+                if any(alias in cell_lower for alias in aliases if len(alias) >= 3):
                     headers[field] = col_idx
                     break
 
@@ -97,4 +109,18 @@ class ExcelParser(BaseParser):
             idx += 1
 
         wb.close()
+
+        # Duplicate indices (bad source sheets) would make multiple entries
+        # share one translation slot — reindex sequentially if any collide.
+        seen: set[int] = set()
+        has_duplicates = False
+        for entry in entries:
+            if entry.index in seen:
+                has_duplicates = True
+                break
+            seen.add(entry.index)
+        if has_duplicates:
+            for i, entry in enumerate(entries, start=1):
+                entry.index = i
+
         return entries
