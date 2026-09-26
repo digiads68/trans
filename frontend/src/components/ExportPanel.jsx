@@ -1,78 +1,37 @@
 import React, { useState } from 'react';
-import { Download, FileText, FileSpreadsheet, Film, Tv, Loader2, XCircle } from 'lucide-react';
+import {
+  Download, FileText, FileSpreadsheet, Film, Tv, Loader2, XCircle, X, AlertTriangle, Languages,
+} from 'lucide-react';
 import { downloadExport } from '../services/api';
 
 const EXPORT_FORMATS = [
-  {
-    id: 'srt',
-    label: 'File SRT',
-    ext: 'srt',
-    description: 'Tương thích với mọi trình phát video',
-    icon: FileText,
-    color: 'blue',
-  },
-  {
-    id: 'xlsx',
-    label: 'File Excel',
-    ext: 'xlsx',
-    description: 'Bao gồm bản gốc và bản dịch song ngữ',
-    icon: FileSpreadsheet,
-    color: 'green',
-  },
-  {
-    id: 'vtt',
-    label: 'File VTT',
-    ext: 'vtt',
-    description: 'WebVTT — dành cho HTML5 video, YouTube',
-    icon: FileText,
-    color: 'purple',
-  },
-  {
-    id: 'premiere',
-    label: 'Premiere Pro XML',
-    ext: 'xml',
-    description: 'Import vào Adobe Premiere Pro',
-    icon: Film,
-    color: 'orange',
-  },
-  {
-    id: 'davinci',
-    label: 'DaVinci Resolve SRT',
-    ext: 'srt',
-    description: 'SRT tối ưu cho DaVinci Resolve',
-    icon: Tv,
-    color: 'pink',
-  },
-  {
-    id: 'ass',
-    label: 'File ASS',
-    ext: 'ass',
-    description: 'Advanced SubStation Alpha — anime, karaoke',
-    icon: FileText,
-    color: 'teal',
-  },
+  { id: 'srt', label: 'SRT', ext: 'srt', description: 'Mọi trình phát video', icon: FileText },
+  { id: 'ass', label: 'ASS', ext: 'ass', description: 'Giữ nguyên style/vị trí của file ASS gốc', icon: FileText },
+  { id: 'vtt', label: 'WebVTT', ext: 'vtt', description: 'HTML5 video, YouTube', icon: FileText },
+  { id: 'xlsx', label: 'Excel', ext: 'xlsx', description: 'Song ngữ + trạng thái từng dòng', icon: FileSpreadsheet },
+  { id: 'premiere', label: 'Premiere XML', ext: 'xml', description: 'Adobe Premiere Pro', icon: Film },
+  { id: 'davinci', label: 'DaVinci SRT', ext: 'srt', description: 'DaVinci Resolve (UTF-8, không BOM)', icon: Tv },
 ];
 
-const colorMap = {
-  blue:   'hover:border-blue-500 hover:bg-blue-50 group-hover:text-blue-600',
-  green:  'hover:border-green-500 hover:bg-green-50 group-hover:text-green-600',
-  purple: 'hover:border-purple-500 hover:bg-purple-50 group-hover:text-purple-600',
-  orange: 'hover:border-orange-500 hover:bg-orange-50 group-hover:text-orange-600',
-  pink:   'hover:border-pink-500 hover:bg-pink-50 group-hover:text-pink-600',
-  teal:   'hover:border-teal-500 hover:bg-teal-50 group-hover:text-teal-600',
-};
-
-export default function ExportPanel({ fileId, filename, targetLang = 'vi' }) {
+export default function ExportPanel({ fileId, filename, targetLang = 'vi', counts, onClose }) {
   const baseName = filename?.replace(/\.[^.]+$/, '') || 'subtitle';
   const [downloading, setDownloading] = useState(null);
   const [error, setError] = useState(null);
+  const [bilingual, setBilingual] = useState(false);
+  const [untranslated, setUntranslated] = useState('source');
+
+  const missing = counts?.untranslated || 0;
+  const unreviewed = counts ? counts.total - counts.reviewed - missing : 0;
+  const nothingTranslated = counts && counts.total === missing;
 
   const handleDownload = async (fmt) => {
     setDownloading(fmt.id);
     setError(null);
     try {
-      const outputName = `${baseName}_${targetLang}.${fmt.ext}`;
-      await downloadExport(fileId, fmt.id, targetLang, outputName);
+      const suffix = bilingual && ['srt', 'vtt', 'ass', 'davinci'].includes(fmt.id) ? '_songngu' : '';
+      await downloadExport(fileId, fmt.id, `${baseName}_${targetLang}${suffix}.${fmt.ext}`, {
+        targetLang, bilingual, untranslated,
+      });
     } catch (err) {
       setError(err.message || 'Xuất file thất bại');
     }
@@ -80,46 +39,82 @@ export default function ExportPanel({ fileId, filename, targetLang = 'vi' }) {
   };
 
   return (
-    <div className="card">
-      <h3 className="font-semibold text-lg mb-4 flex items-center gap-2">
-        <Download className="w-5 h-5 text-green-600" />
-        Tải xuống bản dịch
-      </h3>
-
-      {error && (
-        <div className="mb-4 bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700 flex items-center gap-2">
-          <XCircle className="w-4 h-4 flex-shrink-0" />
-          {error}
+    <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between px-5 py-3 border-b">
+          <h3 className="font-semibold flex items-center gap-2">
+            <Download className="w-5 h-5 text-green-600" /> Xuất bản dịch
+          </h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600" aria-label="Đóng"><X className="w-5 h-5" /></button>
         </div>
-      )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-        {EXPORT_FORMATS.map((fmt) => {
-          const Icon = fmt.icon;
-          const hoverClasses = colorMap[fmt.color];
-          const outputName = `${baseName}_${targetLang}.${fmt.ext}`;
-          const isDownloading = downloading === fmt.id;
+        <div className="p-5 space-y-4">
+          {nothingTranslated && (
+            <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+              Chưa có dòng nào được dịch. Hãy dịch trước khi xuất.
+            </div>
+          )}
 
-          return (
-            <button
-              key={fmt.id}
-              type="button"
-              onClick={() => handleDownload(fmt)}
-              disabled={isDownloading}
-              className={`flex items-center gap-3 p-4 rounded-xl border-2 border-gray-200 text-left
-                         transition-all group disabled:opacity-60 ${hoverClasses}`}
-            >
-              {isDownloading
-                ? <Loader2 className="w-10 h-10 text-gray-400 flex-shrink-0 animate-spin" />
-                : <Icon className={`w-10 h-10 text-gray-400 flex-shrink-0 ${hoverClasses.split(' ').pop()}`} />}
-              <div className="min-w-0">
-                <p className="font-medium truncate">{fmt.label}</p>
-                <p className="text-sm text-gray-500 truncate">{outputName}</p>
-                <p className="text-xs text-gray-400 mt-0.5">{fmt.description}</p>
+          {!nothingTranslated && missing > 0 && (
+            <div className="bg-amber-50 border border-amber-300 rounded-lg p-3 text-sm">
+              <p className="font-medium text-amber-900 flex items-center gap-1.5">
+                <AlertTriangle className="w-4 h-4" /> Còn {missing} dòng chưa dịch
+              </p>
+              <div className="mt-1.5 space-y-1 text-amber-900">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input type="radio" checked={untranslated === 'source'} onChange={() => setUntranslated('source')} />
+                  Giữ nguyên câu gốc ở các dòng đó
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input type="radio" checked={untranslated === 'empty'} onChange={() => setUntranslated('empty')} />
+                  Để trống các dòng đó
+                </label>
               </div>
-            </button>
-          );
-        })}
+            </div>
+          )}
+
+          {!nothingTranslated && unreviewed > 0 && (
+            <p className="text-xs text-gray-500">
+              Lưu ý: {unreviewed} dòng đã dịch nhưng chưa được duyệt.
+            </p>
+          )}
+
+          <label className="flex items-center gap-2 text-sm cursor-pointer">
+            <input type="checkbox" checked={bilingual} onChange={(e) => setBilingual(e.target.checked)} />
+            <Languages className="w-4 h-4 text-gray-500" />
+            Song ngữ (câu gốc phía trên câu dịch) — cho SRT/ASS/VTT
+          </label>
+
+          {error && (
+            <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700 flex items-center gap-2">
+              <XCircle className="w-4 h-4 flex-shrink-0" /> {error}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {EXPORT_FORMATS.map((fmt) => {
+              const Icon = fmt.icon;
+              const isDownloading = downloading === fmt.id;
+              return (
+                <button
+                  key={fmt.id}
+                  type="button"
+                  onClick={() => handleDownload(fmt)}
+                  disabled={isDownloading || nothingTranslated}
+                  className="flex items-center gap-3 p-3 rounded-lg border-2 border-gray-200 text-left transition-all hover:border-green-500 hover:bg-green-50 disabled:opacity-50"
+                >
+                  {isDownloading
+                    ? <Loader2 className="w-7 h-7 text-gray-400 flex-shrink-0 animate-spin" />
+                    : <Icon className="w-7 h-7 text-gray-400 flex-shrink-0" />}
+                  <div className="min-w-0">
+                    <p className="font-medium text-sm">{fmt.label}</p>
+                    <p className="text-xs text-gray-500">{fmt.description}</p>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -1,7 +1,7 @@
 import asyncio
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from .base import BaseExporter
+from .base import BaseExporter, LANG_NAMES
 from app.models.schemas import SubtitleEntry
 
 
@@ -11,7 +11,9 @@ class ExcelExporter(BaseExporter):
     def file_extension(self) -> str:
         return "xlsx"
 
-    async def export(self, entries: list[SubtitleEntry], output_path: str) -> str:
+    async def export(self, entries: list[SubtitleEntry], output_path: str, **options) -> str:
+        target_name = LANG_NAMES.get(options.get("target_lang") or "vi", options.get("target_lang") or "vi")
+
         def _write_excel():
             wb = Workbook()
             ws = wb.active
@@ -29,7 +31,7 @@ class ExcelExporter(BaseExporter):
             )
 
             # Headers
-            headers = ["#", "Start Time", "End Time", "Original", "Vietnamese Translation"]
+            headers = ["#", "Start Time", "End Time", "Original", f"{target_name} Translation", "Status"]
             for col, header in enumerate(headers, 1):
                 cell = ws.cell(row=1, column=col, value=header)
                 cell.font = header_font
@@ -43,6 +45,7 @@ class ExcelExporter(BaseExporter):
             ws.column_dimensions["C"].width = 16
             ws.column_dimensions["D"].width = 50
             ws.column_dimensions["E"].width = 50
+            ws.column_dimensions["F"].width = 12
 
             # Data rows
             for row_idx, entry in enumerate(entries, 2):
@@ -60,6 +63,7 @@ class ExcelExporter(BaseExporter):
                 )
                 trans_cell.alignment = Alignment(wrap_text=True)
                 trans_cell.border = thin_border
+                ws.cell(row=row_idx, column=6, value=entry.status or "").border = thin_border
 
             wb.save(output_path)
 

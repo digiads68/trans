@@ -1,6 +1,6 @@
 import re
 import aiofiles
-from .base import BaseExporter
+from .base import BaseExporter, render_text
 from app.models.schemas import SubtitleEntry
 
 
@@ -51,11 +51,11 @@ class PremiereExporter(BaseExporter):
         text = text.replace('"', "&quot;")
         return text
 
-    async def export(self, entries: list[SubtitleEntry], output_path: str) -> str:
+    async def export(self, entries: list[SubtitleEntry], output_path: str, **options) -> str:
         subtitle_elements = []
 
         for entry in entries:
-            text = entry.translated_text or entry.original_text
+            text = render_text(entry, options.get("untranslated", "source"), options.get("bilingual", False))
             text_escaped = self._escape_xml(text)
             # Convert newlines to <br/> in XML
             text_escaped = text_escaped.replace("\n", "&#13;")

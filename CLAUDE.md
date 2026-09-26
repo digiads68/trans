@@ -36,7 +36,7 @@ starts with an empty LLM key and Google Translate enabled by default
 Settings UI (⚙️ icon) — it's stored via `backend/app/services/runtime_config.py`,
 no restart needed.
 
-**Tests**: `cd backend && pytest -v` (120 tests, no network/API key required —
+**Tests**: `cd backend && pytest -v` (143 tests, no network/API key required —
 translators are mocked). Frontend has no test suite; verify with `npm run build`
 and manual testing in the browser.
 
@@ -71,15 +71,77 @@ job architecture; **do not revert to a synchronous translate endpoint.**
   distinct message) instead of leaking raw exception text or, worse, silently
   writing `"[Translation error]"` into every subtitle line as if it succeeded.
 
+### Jobs never wipe human work (scope + merge)
+
+- `TranslationRequest.scope`: `missing` (only empty lines), `all_unlocked`
+  (default — skips `edited`/`reviewed` lines), `all` (overwrites edits; the UI
+  asks for confirmation). `job.total` = number of targeted lines.
+- `_run_translation_job` translates **copies** of the target lines and `merge()`s
+  results into the live entries on every progress tick (live fill) and again on
+  complete/cancel/error. A line a human edits *during* the job is never
+  overwritten. Do not reintroduce "clear all translated_text at job start".
+- The request's config (provider, model, glossary, custom_prompt,
+  context_aware, target_lang…) is saved as `file_store[id]["last_config"]` so
+  later single-line retranslation uses the same glossary/film context.
+- `context_aware` and glossary are independent; glossary applies whenever
+  non-empty. Translators accept `full_entries` so context mode picks the real
+  neighbouring lines even when translating a subset.
+
+### Line statuses
+
+`SubtitleEntry.status`: `untranslated` → `machine` (translator wrote it) →
+`edited` (human changed text) → `reviewed` (approved). A validator fills it
+from `translated_text` when missing. Endpoints:
+- `PUT /api/file/{id}/entry/{idx}` (text → `edited`, or explicit `status`)
+- `PUT /api/file/{id}/entries` bulk update (find & replace, undo, bulk review)
+- `POST /api/translate/{id}/entries` `{indices, keep_old}` — retranslate with
+  `last_config` + neighbour context, cache reads bypassed; `keep_old=true`
+  returns `[{index, old, new}]` without writing (UI shows a diff, then confirms
+  via bulk update). 409 while a job runs on the file.
+- `GET /api/file/{id}/stats` counts per status.
+
+### Persistence (`backend/app/services/projects.py`)
+
+`file_store` (routes.py) is the in-memory working copy; every project is
+mirrored to `backend/data/projects/{file_id}.json` (atomic tmp + `os.replace`).
+Immediate saves on upload/edit/bulk/retranslate/job end; job progress uses the
+debounced `mark_dirty` flusher. Always access files via `_get_file(id)` — it
+404s, bumps `last_access`, and reloads evicted projects from disk. Cleanup
+(`main.py`) evicts projects idle > `FILE_STORE_TTL` from memory only, and
+deletes from disk after `PROJECT_TTL` (14 days) idle. `GET/DELETE
+/api/projects[/{id}]` power the "Dự án gần đây" list. Uploads with zero
+subtitle lines are rejected.
+
+### Formatting tags & ASS round-trip
+
+`parser/tags.py::split_tags` moves whole-line tags (`{\an8}`, `<i>…</i>`,
+`{\i1}…{\i0}`) into `entry.prefix/suffix`; translators only ever see clean
+`original_text`. Mid-line tags are dropped (original kept in `raw_text`; UI
+warns). ASS parser keeps the header (`parser.header` → `file_store[id]
+["ass_header"]`) and per-line Layer/Style/Name/Margins/Effect in
+`ass_fields`; the ASS exporter reuses them. All exporters render text via
+`exporter/base.py::render_text` (re-applies tags, `bilingual`, `untranslated`
+= source|empty). `GET /export/{id}?untranslated=error` → 409 with count;
+`POST /api/export/batch` → ZIP with `_report.txt`.
+
 ### Frontend counterpart
 
-- `frontend/src/hooks/useTranslation.js` owns the job lifecycle (start, poll,
-  WS, cancel) and **must be instantiated in `App.jsx`**, not in a screen
-  component. It used to live in `TranslationConfig`, which unmounts the moment
-  translation starts (`App` switches `step` to `'translating'`) — that killed
-  the WebSocket instantly and progress never updated. If you're adding a new
-  screen that starts translation, pass the hook's functions down as props;
-  don't call `useTranslation()` again in that screen.
+- Screens: `upload` (FileUpload + recent projects) → `workspace` (one screen
+  for translating AND post-editing) or `batch` (BatchManager).
+- `frontend/src/hooks/useTranslation.js` owns the job lifecycle (start,
+  `resume` after refresh, poll, WS, cancel) and **must be instantiated in
+  `App.jsx`**, never in a screen component (it once lived in a screen that
+  unmounted mid-job, which killed progress). Workspace receives it as the
+  `translation` prop. `jobFileId` says which file the running job belongs to.
+- `Workspace.jsx` owns `entries`; while its file's job runs it refetches
+  entries (throttled) when `progress.completed` changes → lines fill in live.
+  Children: `ConfigPanel` (collapsible; provider/model/langs/profile/glossary/
+  film context/scope), `SubtitleEditor` (keyboard post-editing, statuses,
+  filters, search `#123`/`00:12:30` jump, find & replace with undo,
+  multi-select retranslate diff, QC), `VideoPanel` (local object-URL video,
+  click time → seek, overlay, active-line follow), `ExportPanel` (modal).
+- Shared helpers (timestamps, QC rules, languages, film profiles in
+  localStorage) live in `frontend/src/utils/subtitle.js`.
 - A generation counter (`genRef` in the hook) makes stale jobs a no-op if the
   user cancels and starts a new one before the old one's callbacks fire.
 
@@ -113,19 +175,17 @@ job architecture; **do not revert to a synchronous translate endpoint.**
   translation quality regressions. DB lives in `backend/data/translation_cache.db`
   (persists across restarts; was `/tmp` before).
 
-## Frontend pro features (for film translators specifically)
+## Post-editing UX conventions (film translators)
 
-- **QC panel** in `SubtitlePreview.jsx` — computes CPS (chars/sec), overlong
-  lines (>42 chars), display duration (<1s or >7s) client-side from existing
-  timestamps, Netflix-style. Filter tabs: All / Issues / Untranslated / Manually edited.
-- **Find & Replace** (same file) — bulk replace across all translated lines,
-  case-sensitive toggle, preview match count before applying.
-- **Film profiles** in `TranslationConfig.jsx` — glossary + custom film-context
-  prompt + provider/model saved to `localStorage` (key `subtranslator_film_profiles`)
-  so a multi-episode series keeps consistent character names/tone without
-  re-typing the glossary per episode.
-- **BatchManager** — "Dịch tất cả" sequentially translates every pending file
-  in a batch upload using one shared config, with live per-file progress.
+- Editor keys: Enter = save + next line, Shift+Enter = newline, Ctrl+Enter =
+  save + mark reviewed + next, Alt+↑/↓ = save + move, Esc = cancel.
+- QC (client-side, Netflix-style): CPS > 20, line > 42 chars, duration < 1s or
+  > 7s — shown per row and live while typing.
+- Film profiles (`localStorage` key `subtranslator_film_profiles`): glossary +
+  film context + provider/model + target language, reused across episodes and
+  by BatchManager's "Dịch tất cả" (which uses `scope: missing`).
+- After any job finishes the ConfigPanel scope resets to `missing` so the next
+  run can't accidentally overwrite work.
 
 ## Known environment quirk
 
@@ -140,6 +200,10 @@ the code is broken.
 
 - `backend/tests/test_jobs.py` — job lifecycle, real cancellation with partial
   results, error classification (auth/rate-limit → Vietnamese messages).
+- `backend/tests/test_workflow.py` — persistence/reload, scope + merge (edits
+  survive re-runs and concurrent edits), statuses/bulk update, retranslate with
+  stored config, export options + ZIP, ASS round-trip, tag splitting.
+- `conftest.py` points `PROJECTS_DIR`/`CACHE_DB_PATH` at temp dirs.
 - `backend/tests/test_routes_extended.py` — uses a `TestClient` **as a context
   manager** (`with TestClient(app) as c:`) so the background job's asyncio task
   shares an event loop with the polling requests in the same test. If you drop

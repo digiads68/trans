@@ -1,5 +1,5 @@
 import aiofiles
-from .base import BaseExporter
+from .base import BaseExporter, render_text
 from app.models.schemas import SubtitleEntry
 
 
@@ -9,13 +9,13 @@ class SRTExporter(BaseExporter):
     def file_extension(self) -> str:
         return "srt"
 
-    async def export(self, entries: list[SubtitleEntry], output_path: str) -> str:
+    async def export(self, entries: list[SubtitleEntry], output_path: str, **options) -> str:
         lines = []
         for entry in entries:
             lines.append(str(entry.index))
             if entry.start_time and entry.end_time:
                 lines.append(f"{entry.start_time} --> {entry.end_time}")
-            text = entry.translated_text or entry.original_text
+            text = render_text(entry, options.get("untranslated", "source"), options.get("bilingual", False))
             lines.append(text)
             lines.append("")  # blank line between entries
 

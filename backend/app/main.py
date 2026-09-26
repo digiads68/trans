@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.api.routes import router, file_store
 from app.plugins.manager import PluginManager
+from app.services import projects
 
 logging.basicConfig(
     level=logging.DEBUG if settings.DEBUG else logging.INFO,
@@ -22,32 +23,35 @@ plugin_manager = PluginManager(plugins_dir=settings.PLUGINS_DIR)
 
 
 async def cleanup_expired_files():
-    """Background task to clean up expired files from file_store."""
+    """Evict idle projects from memory (they stay on disk) and purge old ones from disk."""
+    from app.services import jobs
+
     while True:
         await asyncio.sleep(settings.FILE_CLEANUP_INTERVAL)
         now = time.time()
-        expired = [
+        projects.flush_dirty(file_store)
+        active = {fid for fid in file_store if (j := jobs.get_job(fid)) and j.is_active}
+        idle = [
             fid for fid, data in file_store.items()
-            if now - data.get("created_at", now) > settings.FILE_STORE_TTL
+            if fid not in active
+            and now - (data.get("last_access") or data.get("created_at", now)) > settings.FILE_STORE_TTL
         ]
-        for fid in expired:
-            data = file_store.pop(fid, None)
-            if data:
-                upload_path = data.get("upload_path")
-                if upload_path and os.path.exists(upload_path):
-                    try:
-                        os.remove(upload_path)
-                    except OSError:
-                        pass
-                logger.info(f"Cleaned up expired file: {fid}")
-        if expired:
-            logger.info(f"Cleanup: removed {len(expired)} expired files")
+        for fid in idle:
+            projects.save_project(fid, file_store)
+            file_store.pop(fid, None)
+        purged = projects.purge_expired_on_disk(active)
+        if idle or purged:
+            logger.info(f"Cleanup: evicted {len(idle)} idle project(s) from memory, purged {purged} from disk")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    loaded = projects.load_all(file_store)
+    if loaded:
+        logger.info(f"Restored {loaded} project(s) from disk")
     asyncio.create_task(cleanup_expired_files())
+    asyncio.create_task(projects.flusher(file_store))
     count = plugin_manager.discover()
     if count:
         logger.info(f"Loaded {count} plugin(s)")
@@ -57,6 +61,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    projects.flush_dirty(file_store)
     await plugin_manager.emit_shutdown()
 
 

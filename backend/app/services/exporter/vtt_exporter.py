@@ -1,5 +1,5 @@
 import aiofiles
-from .base import BaseExporter
+from .base import BaseExporter, render_text
 from app.models.schemas import SubtitleEntry
 
 
@@ -29,7 +29,7 @@ class VTTExporter(BaseExporter):
                 ts = f"{int(h):02d}:{int(m):02d}:{int(sec):02d}.{frac}"
         return ts
 
-    async def export(self, entries: list[SubtitleEntry], output_path: str) -> str:
+    async def export(self, entries: list[SubtitleEntry], output_path: str, **options) -> str:
         lines = ["WEBVTT", ""]
 
         for entry in entries:
@@ -40,7 +40,7 @@ class VTTExporter(BaseExporter):
             end = self._normalize_timestamp(entry.end_time) if entry.end_time else "00:00:00.000"
             lines.append(f"{start} --> {end}")
 
-            text = entry.translated_text or entry.original_text
+            text = render_text(entry, options.get("untranslated", "source"), options.get("bilingual", False))
             lines.append(text)
             lines.append("")  # blank line between cues
 

@@ -61,6 +61,8 @@ class LLMTranslator(BaseTranslator):
         )
         self.batch_size = settings.BATCH_SIZE
         self.max_concurrent = settings.MAX_CONCURRENT_REQUESTS
+        # Retranslation wants a fresh answer; results are still written to cache
+        self.skip_cache_read = False
 
     @property
     def provider_name(self) -> str:
@@ -332,7 +334,9 @@ class LLMTranslator(BaseTranslator):
         # Check cache first; only send uncached entries to LLM
         uncached: list[SubtitleEntry] = []
         for entry in entries:
-            cached = await get_cached(source_lang, target_lang, entry.original_text, context=cache_ctx)
+            cached = None if self.skip_cache_read else await get_cached(
+                source_lang, target_lang, entry.original_text, context=cache_ctx
+            )
             if cached is not None:
                 entry.translated_text = cached
             else:
@@ -426,8 +430,14 @@ class LLMTranslator(BaseTranslator):
         custom_prompt: Optional[str] = None,
         glossary: Optional[dict[str, str]] = None,
         should_cancel=None,
+        full_entries: Optional[list[SubtitleEntry]] = None,
     ) -> list[SubtitleEntry]:
-        """Translate all entries in batches with concurrency control."""
+        """Translate all entries in batches with concurrency control.
+
+        full_entries: the whole file, when `entries` is only a subset (e.g.
+        retranslating a few lines) — context-aware mode then takes the real
+        neighbouring lines from it.
+        """
         system_prompt = self._build_system_prompt(
             source_lang, target_lang, mode, custom_prompt, glossary
         )
@@ -440,14 +450,19 @@ class LLMTranslator(BaseTranslator):
         completed = 0
         total = len(entries)
 
+        source = full_entries or entries
+        position = {e.index: i for i, e in enumerate(source)}
+
         def _context_for(chunk_idx: int) -> Optional[list[SubtitleEntry]]:
             if mode != TranslationMode.CONTEXT_AWARE:
                 return None
+            chunk = chunks[chunk_idx]
+            chunk_ids = {e.index for e in chunk}
             # 3 lines before and 2 after the chunk for coherent translation
-            start = chunk_idx * self.batch_size
-            end = min(start + self.batch_size, total)
-            before = entries[max(0, start - 3):start]
-            after = entries[end:min(end + 2, total)]
+            start = position.get(chunk[0].index, chunk_idx * self.batch_size)
+            end = position.get(chunk[-1].index, start + len(chunk) - 1) + 1
+            before = [e for e in source[max(0, start - 3):start] if e.index not in chunk_ids]
+            after = [e for e in source[end:end + 2] if e.index not in chunk_ids]
             return (before + after) or None
 
         async def process_chunk(chunk_idx: int, chunk: list[SubtitleEntry]):

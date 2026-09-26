@@ -39,6 +39,7 @@ class BaseTranslator(ABC):
         custom_prompt: Optional[str] = None,
         glossary: Optional[dict[str, str]] = None,
         should_cancel: CancelCheck = None,
+        full_entries: Optional[list[SubtitleEntry]] = None,
     ) -> list[SubtitleEntry]:
         """Translate a batch of subtitle entries.
 

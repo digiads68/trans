@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field
-from typing import Optional
+from pydantic import BaseModel, Field, model_validator
+from typing import Literal, Optional
 from enum import Enum
 
 
@@ -22,13 +22,35 @@ class FileType(str, Enum):
     VTT = "vtt"
 
 
+EntryStatus = Literal["untranslated", "machine", "edited", "reviewed"]
+LOCKED_STATUSES = ("edited", "reviewed")
+
+
 class SubtitleEntry(BaseModel):
     index: int
     start_time: Optional[str] = None
     end_time: Optional[str] = None
+    # Clean text sent to translators (formatting tags split off into prefix/suffix)
     original_text: str
     translated_text: Optional[str] = None
     source_lang: Optional[str] = None
+    # untranslated → machine (translator wrote it) → edited (human) → reviewed (approved)
+    status: Optional[EntryStatus] = None
+    prefix: str = ""
+    suffix: str = ""
+    raw_text: Optional[str] = None
+    # ASS Dialogue fields other than Start/End/Text (layer, style, name, margins, effect)
+    ass_fields: Optional[dict[str, str]] = None
+
+    @model_validator(mode="after")
+    def _default_status(self):
+        if self.status is None:
+            self.status = "machine" if self.translated_text else "untranslated"
+        return self
+
+    @property
+    def is_locked(self) -> bool:
+        return self.status in LOCKED_STATUSES
 
 
 class TranslationRequest(BaseModel):
@@ -46,6 +68,46 @@ class TranslationRequest(BaseModel):
     hybrid_refine: bool = False  # Use LLM to refine Google translation
     # WebHook notification (5.6)
     webhook_url: Optional[str] = None
+    # Which lines to translate:
+    #   missing       — only lines with no translation yet
+    #   all_unlocked  — everything except human-edited/reviewed lines (default)
+    #   all           — everything, overwriting human edits
+    scope: Literal["missing", "all_unlocked", "all"] = "all_unlocked"
+    # Context-aware and glossary are independent; glossary applies whenever given
+    context_aware: bool = False
+
+    @property
+    def effective_mode(self) -> "TranslationMode":
+        if self.context_aware or self.mode == TranslationMode.CONTEXT_AWARE:
+            return TranslationMode.CONTEXT_AWARE
+        return self.mode
+
+
+class EntryUpdate(BaseModel):
+    index: int
+    translated_text: Optional[str] = None
+    status: Optional[EntryStatus] = None
+
+
+class BulkEntryUpdateRequest(BaseModel):
+    updates: list[EntryUpdate]
+
+
+class RetranslateRequest(BaseModel):
+    indices: list[int]
+    # True: return suggestions without writing (client confirms via bulk update)
+    keep_old: bool = False
+    # Optional overrides on top of the file's last translation config
+    provider: Optional[TranslationProvider] = None
+    llm_model: Optional[str] = None
+    target_lang: Optional[str] = None
+
+
+class BatchExportRequest(BaseModel):
+    file_ids: list[str]
+    format: str = "srt"
+    target_lang: str = "vi"
+    bilingual: bool = False
 
 
 class BatchTranslationRequest(BaseModel):

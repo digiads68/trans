@@ -1,6 +1,7 @@
 import re
 from .base import BaseParser
 from app.models.schemas import SubtitleEntry
+from .tags import split_tags
 
 
 class VTTParser(BaseParser):
@@ -60,9 +61,9 @@ class VTTParser(BaseParser):
 
             # Remaining lines: subtitle text
             text_lines = lines[time_line_idx + 1:]
-            subtitle_text = "\n".join(text_lines).strip()
-
-            # Remove VTT markup tags like <b>, <i>, <c.color>, <v Name>
+            raw = "\n".join(text_lines).strip()
+            subtitle_text, prefix, suffix = split_tags(raw)
+            # Remove remaining VTT markup like <c.color>, <v Name>
             subtitle_text = re.sub(r"<[^>]+>", "", subtitle_text).strip()
 
             if subtitle_text:
@@ -71,6 +72,9 @@ class VTTParser(BaseParser):
                     start_time=start_time,
                     end_time=end_time,
                     original_text=subtitle_text,
+                    prefix=prefix,
+                    suffix=suffix,
+                    raw_text=raw if raw != subtitle_text else None,
                 ))
                 index += 1
 

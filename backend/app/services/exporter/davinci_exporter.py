@@ -1,5 +1,5 @@
 import aiofiles
-from .base import BaseExporter
+from .base import BaseExporter, render_text
 from app.models.schemas import SubtitleEntry
 
 
@@ -35,7 +35,7 @@ class DaVinciExporter(BaseExporter):
                 ts = f"{int(h):02d}:{int(m):02d}:{int(rest):02d},000"
         return ts
 
-    async def export(self, entries: list[SubtitleEntry], output_path: str) -> str:
+    async def export(self, entries: list[SubtitleEntry], output_path: str, **options) -> str:
         lines = []
         for entry in entries:
             lines.append(str(entry.index))
@@ -45,7 +45,7 @@ class DaVinciExporter(BaseExporter):
                 end = self._normalize_srt_timestamp(entry.end_time)
                 lines.append(f"{start} --> {end}")
 
-            text = entry.translated_text or entry.original_text
+            text = render_text(entry, options.get("untranslated", "source"), options.get("bilingual", False))
             lines.append(text)
             lines.append("")  # blank line between entries
 

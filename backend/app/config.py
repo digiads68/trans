@@ -42,9 +42,12 @@ class Settings(BaseSettings):
     # Upload limits
     MAX_UPLOAD_SIZE: int = 50_000_000  # 50MB
 
-    # File store TTL (seconds)
-    FILE_STORE_TTL: int = 7200  # 2 hours
+    # Projects: evicted from memory after FILE_STORE_TTL idle seconds (kept on
+    # disk), deleted from disk after PROJECT_TTL idle seconds.
+    FILE_STORE_TTL: int = 7200  # 2 hours idle
     FILE_CLEANUP_INTERVAL: int = 1800  # 30 minutes
+    PROJECT_TTL: int = 14 * 86400  # 14 days idle
+    PROJECTS_DIR: str = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "projects")
 
     # Future: Video integration plugins
     PLUGINS_DIR: str = "plugins"
@@ -56,3 +59,4 @@ settings = Settings()
 
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
+os.makedirs(settings.PROJECTS_DIR, exist_ok=True)

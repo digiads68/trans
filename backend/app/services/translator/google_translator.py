@@ -45,6 +45,7 @@ class GoogleTranslator(BaseTranslator):
 
     def __init__(self):
         self.cache_ctx = "google"
+        self.skip_cache_read = False
 
     @property
     def provider_name(self) -> str:
@@ -157,6 +158,7 @@ class GoogleTranslator(BaseTranslator):
         custom_prompt: Optional[str] = None,
         glossary: Optional[dict[str, str]] = None,
         should_cancel=None,
+        full_entries=None,
     ) -> list[SubtitleEntry]:
         """Translate all entries using Google Translate with grouped requests."""
         total = len(entries)
@@ -165,7 +167,7 @@ class GoogleTranslator(BaseTranslator):
         # Serve cache hits first
         uncached: list[SubtitleEntry] = []
         for entry in entries:
-            cached = await get_cached(
+            cached = None if self.skip_cache_read else await get_cached(
                 source_lang, target_lang, entry.original_text, context=self.cache_ctx
             )
             if cached is not None:

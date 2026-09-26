@@ -8,6 +8,14 @@
 - **6 format xuất**: SRT, Excel, VTT, ASS, Premiere Pro XML, DaVinci Resolve SRT
 - **3 nguồn dịch**: AI (LLM via cliproxyapi), Google Translate, Hybrid (Google + AI tinh chỉnh)
 - **3 chế độ dịch**: Tiêu chuẩn, Theo ngữ cảnh, Bảng thuật ngữ
+- **Không gian làm việc một màn hình**: dịch và hậu kiểm cùng chỗ — các dòng dịch xong hiện dần để duyệt ngay
+- **Lưu dự án tự động**: mọi chỉnh sửa lưu xuống đĩa, mở lại từ "Dự án gần đây", không mất khi F5/khởi động lại
+- **Không bao giờ ghi đè bản sửa tay**: dịch lại chỉ các dòng chưa dịch hoặc chưa sửa; trạng thái dòng Máy dịch / Đã sửa / Đã duyệt
+- **Hậu kiểm bằng bàn phím**: Enter lưu & sang dòng sau, Ctrl+Enter duyệt, Alt+↑/↓ di chuyển; nhảy tới `#123` / `00:12:30`
+- **Dịch lại có so sánh**: chọn nhiều dòng → xem bản cũ/mới trước khi áp dụng, dùng lại glossary + bối cảnh phim
+- **Video đối chiếu**: mở video trên máy (không tải lên), bấm dòng để tua, phụ đề dịch hiển thị trên video
+- **Giữ định dạng**: tag `{\an8}`, `<i>` và style/vị trí của file ASS được giữ nguyên khi xuất
+- **Xuất song ngữ, cảnh báo dòng chưa dịch, xuất ZIP cả bộ phim**
 - **Job-based translation**: dịch chạy nền, không giới hạn thời gian, hủy được thật sự (giữ lại phần đã dịch)
 - **Bảng QC chuyên nghiệp**: cảnh báo CPS (ký tự/giây), dòng quá dài, thời lượng hiển thị bất thường, dòng chưa dịch — chuẩn Netflix
 - **Tìm & Thay thế hàng loạt**: đổi tên nhân vật/xưng hô đồng loạt trong bản dịch
@@ -127,13 +135,19 @@ trans/
 | POST | `/api/upload` | Upload 1 file phụ đề |
 | POST | `/api/upload/batch` | Upload nhiều file |
 | GET | `/api/file/{id}/entries` | Xem entries (phân trang) |
+| GET | `/api/file/{id}/stats` | Số dòng theo trạng thái |
+| PUT | `/api/file/{id}/entries` | Cập nhật nhiều dòng (thay thế, hoàn tác, duyệt) |
+| GET | `/api/projects` | Dự án gần đây |
+| GET/DELETE | `/api/projects/{id}` | Chi tiết / xóa dự án |
 | POST | `/api/translate` | Bắt đầu **job dịch** (trả về ngay, không chờ) |
 | GET | `/api/translate/{id}/status` | Poll tiến trình job (completed/failed/error) |
 | POST | `/api/translate/{id}/cancel` | Hủy job — giữ lại các dòng đã dịch |
 | POST | `/api/translate/batch` | Dịch nhiều file (đồng bộ, cho API users) |
+| POST | `/api/translate/{id}/entries` | Dịch lại nhiều dòng (có chế độ xem trước) |
 | POST | `/api/translate/{id}/entry/{idx}` | Dịch lại 1 dòng |
 | PUT | `/api/file/{id}/entry/{idx}` | Sửa bản dịch thủ công |
-| GET | `/api/export/{id}` | Xuất file (format=srt/xlsx/vtt/ass/premiere/davinci) |
+| GET | `/api/export/{id}` | Xuất file (format=srt/xlsx/vtt/ass/premiere/davinci, bilingual, untranslated) |
+| POST | `/api/export/batch` | Xuất nhiều file thành ZIP |
 | GET | `/api/config` | Xem cấu hình API (key được che) |
 | POST | `/api/config` | Cập nhật API key/base runtime |
 | POST | `/api/config/test` | Test API key |

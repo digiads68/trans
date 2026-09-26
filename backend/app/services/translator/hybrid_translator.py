@@ -74,6 +74,7 @@ class HybridTranslator(BaseTranslator):
         custom_prompt: Optional[str] = None,
         glossary: Optional[dict[str, str]] = None,
         should_cancel=None,
+        full_entries: Optional[list[SubtitleEntry]] = None,
     ) -> list[SubtitleEntry]:
         """Translate batch with hybrid approach."""
         total = len(entries)
@@ -96,6 +97,7 @@ class HybridTranslator(BaseTranslator):
                 custom_prompt=custom_prompt,
                 glossary=glossary,
                 should_cancel=should_cancel,
+                full_entries=full_entries,
             )
         except TranslationCancelled:
             raise
@@ -107,6 +109,7 @@ class HybridTranslator(BaseTranslator):
                 custom_prompt=custom_prompt,
                 glossary=glossary,
                 should_cancel=should_cancel,
+                full_entries=full_entries,
             )
             return entries
 

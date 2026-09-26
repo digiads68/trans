@@ -86,54 +86,85 @@ export const cancelJob = async (fileId) => {
   return response.data;
 };
 
-export const retranslateEntry = async (fileId, entryIndex, provider, model, targetLang) => {
-  const response = await api.post(
-    `/translate/${fileId}/entry/${entryIndex}`,
-    null,
-    { params: { provider, llm_model: model, target_lang: targetLang } }
-  );
+export const updateEntry = async (fileId, entryIndex, translatedText, status) => {
+  const params = {};
+  if (translatedText !== undefined) params.translated_text = translatedText;
+  if (status) params.status = status;
+  const response = await api.put(`/file/${fileId}/entry/${entryIndex}`, null, { params });
   return response.data;
 };
 
-export const updateEntry = async (fileId, entryIndex, translatedText) => {
-  const response = await api.put(
-    `/file/${fileId}/entry/${entryIndex}`,
-    null,
-    { params: { translated_text: translatedText } }
-  );
-  return response.data;
-};
+async function blobErrorMessage(err, fallback) {
+  // Error responses of blob requests come back as blobs — decode the JSON detail
+  if (err.response?.data instanceof Blob) {
+    const text = await err.response.data.text();
+    try {
+      return JSON.parse(text).detail || fallback;
+    } catch {
+      return fallback;
+    }
+  }
+  return err.response?.data?.detail || err.message || fallback;
+}
 
-// Download an export as a blob and trigger the browser download.
-// Throws with a clean message when the backend rejects (e.g. no translations).
-export const downloadExport = async (fileId, format = 'srt', targetLang = 'vi', filename = 'subtitle') => {
+function saveBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// options: { targetLang, bilingual, untranslated: 'source'|'empty'|'error' }
+export const downloadExport = async (fileId, format, filename, options = {}) => {
   try {
     const response = await api.get(`/export/${fileId}`, {
-      params: { format, target_lang: targetLang },
+      params: {
+        format,
+        target_lang: options.targetLang,
+        bilingual: options.bilingual || undefined,
+        untranslated: options.untranslated || 'source',
+      },
       responseType: 'blob',
     });
-    const url = URL.createObjectURL(response.data);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    saveBlob(response.data, filename);
   } catch (err) {
-    // Error responses come back as blobs — decode the JSON detail
-    if (err.response?.data instanceof Blob) {
-      const text = await err.response.data.text();
-      let detail = 'Xuất file thất bại';
-      try {
-        detail = JSON.parse(text).detail || detail;
-      } catch {
-        // not JSON — keep generic message
-      }
-      throw new Error(detail);
-    }
-    throw new Error(err.response?.data?.detail || err.message || 'Xuất file thất bại');
+    throw new Error(await blobErrorMessage(err, 'Xuất file thất bại'));
   }
+};
+
+export const downloadBatchZip = async (fileIds, format, targetLang, bilingual = false) => {
+  try {
+    const response = await api.post('/export/batch', {
+      file_ids: fileIds, format, target_lang: targetLang, bilingual,
+    }, { responseType: 'blob', timeout: 300000 });
+    saveBlob(response.data, `phu_de_${targetLang}.zip`);
+  } catch (err) {
+    throw new Error(await blobErrorMessage(err, 'Xuất ZIP thất bại'));
+  }
+};
+
+// ── Projects & editing ───────────────────────────────────────────────────────
+
+export const listProjects = async () => (await api.get('/projects')).data.projects;
+export const getProject = async (fileId) => (await api.get(`/projects/${fileId}`)).data;
+export const deleteProject = async (fileId) => (await api.delete(`/projects/${fileId}`)).data;
+
+// updates: [{ index, translated_text?, status? }]
+export const bulkUpdateEntries = async (fileId, updates) => {
+  const response = await api.put(`/file/${fileId}/entries`, { updates });
+  return response.data.entries;
+};
+
+// Returns [{ index, old, new }]; keepOld=true writes nothing (preview for a diff)
+export const retranslateEntries = async (fileId, indices, keepOld = true) => {
+  const response = await api.post(`/translate/${fileId}/entries`, {
+    indices, keep_old: keepOld,
+  }, { timeout: 300000 });
+  return response.data.results;
 };
 
 export const createWebSocket = (fileId) => {

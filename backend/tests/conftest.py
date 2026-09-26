@@ -18,5 +18,7 @@ def pytest_configure(config):
     _tmp = tempfile.mkdtemp()
     os.environ.setdefault("UPLOAD_DIR", os.path.join(_tmp, "uploads"))
     os.environ.setdefault("OUTPUT_DIR", os.path.join(_tmp, "outputs"))
+    os.environ.setdefault("PROJECTS_DIR", os.path.join(_tmp, "projects"))
+    os.environ.setdefault("CACHE_DB_PATH", os.path.join(_tmp, "cache.db"))
     os.makedirs(os.environ["UPLOAD_DIR"], exist_ok=True)
     os.makedirs(os.environ["OUTPUT_DIR"], exist_ok=True)

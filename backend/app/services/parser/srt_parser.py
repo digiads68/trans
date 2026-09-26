@@ -1,6 +1,7 @@
 import re
 from .base import BaseParser
 from app.models.schemas import SubtitleEntry
+from .tags import split_tags
 
 
 class SRTParser(BaseParser):
@@ -49,7 +50,8 @@ class SRTParser(BaseParser):
             end_time = time_match.group(2)
 
             # Remaining lines: subtitle text
-            subtitle_text = "\n".join(lines[2:]).strip()
+            raw = "\n".join(lines[2:]).strip()
+            subtitle_text, prefix, suffix = split_tags(raw)
 
             if subtitle_text:
                 entries.append(
@@ -58,6 +60,9 @@ class SRTParser(BaseParser):
                         start_time=start_time,
                         end_time=end_time,
                         original_text=subtitle_text,
+                        prefix=prefix,
+                        suffix=suffix,
+                        raw_text=raw if raw != subtitle_text else None,
                     )
                 )
 
